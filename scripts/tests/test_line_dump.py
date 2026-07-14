@@ -1,4 +1,4 @@
-"""line_parser / make_digest のテスト。
+"""line_parser / ingest のテスト。
 
 実行:
     cd <repo root> && python3 -m unittest discover -s scripts/tests -v
@@ -6,19 +6,19 @@
 from __future__ import annotations
 
 import io
-import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import make_digest  # noqa: E402
-from line_parser import parse_chat_file, parse_chat_text  # noqa: E402
+import ingest  # noqa: E402
+from line_parser import extract_chat_name, parse_chat_file, parse_chat_text  # noqa: E402
 
 IOS_SAMPLE = """\
 [LINE] 田中太郎とのトーク履歴
@@ -96,6 +96,10 @@ class TestParser(unittest.TestCase):
         self.assertEqual(chat.name, "Alice")
         self.assertEqual(len(chat.messages), 1)
 
+    def test_extract_chat_name(self):
+        self.assertEqual(extract_chat_name(IOS_SAMPLE), "田中太郎")
+        self.assertEqual(extract_chat_name("ヘッダなし本文\n", fallback="fb"), "fb")
+
     def test_fallback_name_from_filename(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "[LINE] 山田花子とのトーク履歴.txt"
@@ -109,117 +113,144 @@ class TestParser(unittest.TestCase):
         self.assertGreaterEqual(chat.skipped_lines, 1)
 
 
-def _write_raw(name: str, body: str) -> None:
-    (make_digest.RAW_DIR / f"[LINE] {name}とのトーク履歴.txt").write_text(
-        body, encoding="utf-8"
-    )
+def _export(name: str, body: str, saved_at: str = "2026/07/14 10:00") -> str:
+    return f"[LINE] {name}とのトーク履歴\n保存日時：{saved_at}\n\n{body}"
 
 
-def _run(*argv: str) -> str:
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        rc = make_digest.main(list(argv))
-    out = buf.getvalue()
-    assert rc == 0, out
-    return out
+def _run(*argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = ingest.main(list(argv))
+    return rc, out.getvalue(), err.getvalue()
 
 
-class TestDigest(unittest.TestCase):
+class TestIngest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self._orig = (make_digest.REPO_ROOT, make_digest.RAW_DIR,
-                      make_digest.DAILY_DIR, make_digest.STATE_PATH)
-        make_digest.REPO_ROOT = self.tmp
-        make_digest.RAW_DIR = self.tmp / "raw"
-        make_digest.DAILY_DIR = self.tmp / "daily"
-        make_digest.STATE_PATH = self.tmp / "state" / "state.json"
-        make_digest.RAW_DIR.mkdir()
+        self._orig = (ingest.REPO_ROOT, ingest.CHATS_DIR)
+        ingest.REPO_ROOT = self.tmp
+        ingest.CHATS_DIR = self.tmp / "chats"
+        self.incoming = self.tmp / "incoming"
+        self.incoming.mkdir()
 
     def tearDown(self):
-        (make_digest.REPO_ROOT, make_digest.RAW_DIR,
-         make_digest.DAILY_DIR, make_digest.STATE_PATH) = self._orig
+        ingest.REPO_ROOT, ingest.CHATS_DIR = self._orig
         shutil.rmtree(self.tmp)
 
-    def test_first_run_respects_first_days(self):
-        _write_raw("田中", (
-            "2026/07/01(水)\n10:00\t田中\t古いメッセージ\n"
-            "2026/07/13(月)\n10:00\t田中\t新しいメッセージ\n"
+    def _incoming(self, filename: str, text: str, mtime: float | None = None) -> Path:
+        p = self.incoming / filename
+        p.write_text(text, encoding="utf-8")
+        if mtime is not None:
+            os.utime(p, (mtime, mtime))
+        return p
+
+    def test_new_chat_creates_canonical_file(self):
+        text = _export("田中太郎", "2026/07/12(日)\n10:00\t田中太郎\tおはよう\n")
+        p = self._incoming("[LINE] 田中太郎とのトーク履歴.txt", text)
+        rc, out, _ = _run(str(p))
+        self.assertEqual(rc, 0)
+        self.assertIn("SUMMARY: updated=1 unchanged=0 skipped=0 added_lines=2 added_messages=1", out)
+        dest = ingest.CHATS_DIR / "田中太郎.txt"
+        self.assertEqual(dest.read_text(encoding="utf-8"), text)
+
+    def test_identical_body_different_header_is_unchanged(self):
+        body = "2026/07/12(日)\n10:00\t田中\tおはよう\n"
+        p1 = self._incoming("a.txt", _export("田中", body, "2026/07/14 10:00"))
+        _run(str(p1))
+        # 保存日時だけ違う再エクスポート → 変化なし扱い(コミット汚れを防ぐ)
+        p2 = self._incoming("b.txt", _export("田中", body, "2026/07/15 09:00"))
+        rc, out, _ = _run(str(p2))
+        self.assertEqual(rc, 0)
+        self.assertIn("unchanged=1", out)
+        self.assertIn("updated=0", out)
+
+    def test_superset_replaces(self):
+        p1 = self._incoming("a.txt", _export("田中", "2026/07/12(日)\n10:00\t田中\t一通目\n"))
+        _run(str(p1))
+        new_text = _export("田中", (
+            "2026/07/12(日)\n10:00\t田中\t一通目\n10:00\t田中\t同じ分の新着\n"
+            "2026/07/13(月)\n09:00\t田中\t翌日の新着\n"
+        ), "2026/07/15 09:00")
+        p2 = self._incoming("b.txt", new_text)
+        rc, out, err = _run(str(p2))
+        self.assertIn("updated=1", out)
+        self.assertIn("added_lines=3 added_messages=2", out)
+        self.assertEqual(err, "")  # 素直な追記なので警告なし
+        dest = ingest.CHATS_DIR / "田中.txt"
+        self.assertEqual(dest.read_text(encoding="utf-8"), new_text)
+
+    def test_shorter_export_is_skipped(self):
+        long_text = _export("田中", "2026/07/12(日)\n10:00\t田中\t一通目\n10:01\t田中\t二通目\n")
+        p1 = self._incoming("a.txt", long_text)
+        _run(str(p1))
+        p2 = self._incoming("b.txt", _export("田中", "2026/07/12(日)\n10:00\t田中\t一通目\n"))
+        rc, out, err = _run(str(p2))
+        self.assertEqual(rc, 0)
+        self.assertIn("skipped=1", out)
+        self.assertIn("短い", err)
+        dest = ingest.CHATS_DIR / "田中.txt"
+        self.assertEqual(dest.read_text(encoding="utf-8"), long_text)
+
+    def test_shorter_export_with_force_replaces(self):
+        p1 = self._incoming("a.txt", _export("田中", "2026/07/12(日)\n10:00\t田中\t一通目\n10:01\t田中\t二通目\n"))
+        _run(str(p1))
+        short_text = _export("田中", "2026/07/12(日)\n10:00\t田中\t一通目\n")
+        p2 = self._incoming("b.txt", short_text)
+        rc, out, _ = _run("--force", str(p2))
+        self.assertIn("updated=1", out)
+        dest = ingest.CHATS_DIR / "田中.txt"
+        self.assertEqual(dest.read_text(encoding="utf-8"), short_text)
+
+    def test_rewritten_history_replaces_with_warning(self):
+        p1 = self._incoming("a.txt", _export("田中", "2026/07/12(日)\n10:00\t田中\t消される予定\n10:01\t田中\t残る\n"))
+        _run(str(p1))
+        new_text = _export("田中", (
+            "2026/07/12(日)\n10:00\t田中\tメッセージの送信を取り消しました\n"
+            "10:01\t田中\t残る\n10:02\t田中\t新着\n"
         ))
-        out = _run("--date", "2026-07-14", "--first-days", "3")
-        self.assertIn("SUMMARY: total=1 chats=1", out)
-        digest = (make_digest.DAILY_DIR / "2026-07-14.md").read_text(encoding="utf-8")
-        self.assertIn("新しいメッセージ", digest)
-        self.assertNotIn("古いメッセージ", digest)
-        # 古いメッセージも「取り込み済み」として state に反映されている
-        state = json.loads(make_digest.STATE_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(state["chats"]["田中"]["last_ts"], "2026-07-13T10:00")
-
-    def test_incremental_no_duplicates(self):
-        _write_raw("田中", "2026/07/13(月)\n10:00\t田中\t一通目\n")
-        _run("--date", "2026-07-14")
-        # 再エクスポート: 同じ内容 + 新着2件（うち1件は同一分内）
-        _write_raw("田中", (
-            "2026/07/13(月)\n10:00\t田中\t一通目\n10:00\t田中\t同じ分の新着\n"
-            "2026/07/14(火)\n09:00\t田中\t翌日の新着\n"
-        ))
-        out = _run("--date", "2026-07-15")
-        self.assertIn("SUMMARY: total=2 chats=1", out)
-        digest = (make_digest.DAILY_DIR / "2026-07-15.md").read_text(encoding="utf-8")
-        self.assertNotIn("一通目", digest)
-        self.assertIn("同じ分の新着", digest)
-        self.assertIn("翌日の新着", digest)
-
-    def test_no_new_messages(self):
-        _write_raw("田中", "2026/07/13(月)\n10:00\t田中\t一通目\n")
-        _run("--date", "2026-07-14")
-        out = _run("--date", "2026-07-15")
-        self.assertIn("SUMMARY: total=0 chats=0 file=none", out)
-        self.assertFalse((make_digest.DAILY_DIR / "2026-07-15.md").exists())
-
-    def test_rerun_same_day_appends(self):
-        _write_raw("田中", "2026/07/13(月)\n10:00\t田中\t一通目\n")
-        _run("--date", "2026-07-14")
-        _write_raw("田中", (
-            "2026/07/13(月)\n10:00\t田中\t一通目\n"
-            "2026/07/14(火)\n08:00\t田中\t二通目\n"
-        ))
-        _run("--date", "2026-07-14")
-        digest = (make_digest.DAILY_DIR / "2026-07-14.md").read_text(encoding="utf-8")
-        self.assertIn("一通目", digest)
-        self.assertIn("追記", digest)
-        self.assertIn("二通目", digest)
-        # H1 見出しは1つだけ
-        self.assertEqual(digest.count("# LINE ダイジェスト"), 1)
-
-    def test_multiple_chats(self):
-        _write_raw("田中", "2026/07/13(月)\n10:00\t田中\tこんにちは\n")
-        _write_raw("グループB", "2026/07/13(月)\n11:00\t佐藤\tやあ\n")
-        out = _run("--date", "2026-07-14")
-        self.assertIn("SUMMARY: total=2 chats=2", out)
-        digest = (make_digest.DAILY_DIR / "2026-07-14.md").read_text(encoding="utf-8")
-        self.assertIn("## 田中", digest)
-        self.assertIn("## グループB", digest)
-
-    def test_duplicate_files_same_chat(self):
-        # Drive の重複保存で同じトークの txt が2つある場合もダブらない
-        _write_raw("田中", "2026/07/13(月)\n10:00\t田中\tこんにちは\n")
-        (make_digest.RAW_DIR / "[LINE] 田中とのトーク履歴 (1).txt").write_text(
-            "[LINE] 田中とのトーク履歴\n\n2026/07/13(月)\n10:00\t田中\tこんにちは\n",
-            encoding="utf-8",
+        p2 = self._incoming("b.txt", new_text)
+        rc, out, err = _run(str(p2))
+        self.assertIn("updated=1", out)
+        self.assertIn("履歴の途中", err)
+        self.assertEqual(
+            (ingest.CHATS_DIR / "田中.txt").read_text(encoding="utf-8"), new_text
         )
-        out = _run("--date", "2026-07-14")
-        self.assertIn("SUMMARY: total=1 chats=1", out)
 
-    def test_dry_run_writes_nothing(self):
-        _write_raw("田中", "2026/07/13(月)\n10:00\t田中\tこんにちは\n")
-        out = _run("--date", "2026-07-14", "--dry-run")
-        self.assertIn("SUMMARY: total=1 chats=1", out)
-        self.assertFalse(make_digest.STATE_PATH.exists())
-        self.assertFalse((make_digest.DAILY_DIR / "2026-07-14.md").exists())
+    def test_multiple_files_same_chat_newest_wins(self):
+        old = _export("田中", "2026/07/12(日)\n10:00\t田中\t一通目\n")
+        new = _export("田中", "2026/07/12(日)\n10:00\t田中\t一通目\n10:01\t田中\t二通目\n")
+        # Drive の重複保存を想定: 「... (1).txt」が最新
+        p_old = self._incoming("[LINE] 田中とのトーク履歴.txt", old, mtime=1000)
+        p_new = self._incoming("[LINE] 田中とのトーク履歴 (1).txt", new, mtime=2000)
+        rc, out, _ = _run(str(p_new), str(p_old))  # 引数順に関係なく mtime 順
+        self.assertIn("updated=2", out)
+        self.assertEqual(
+            (ingest.CHATS_DIR / "田中.txt").read_text(encoding="utf-8"), new
+        )
 
-    def test_empty_raw_dir(self):
-        out = _run("--date", "2026-07-14")
-        self.assertIn("SUMMARY: total=0", out)
+    def test_unsafe_chat_name_sanitized(self):
+        text = _export("A/B:C", "2026/07/12(日)\n10:00\tA\thi\n")
+        p = self._incoming("x.txt", text)
+        _run(str(p))
+        self.assertTrue((ingest.CHATS_DIR / "A_B_C.txt").exists())
+
+    def test_headerless_file_uses_filename(self):
+        text = "2026/07/12(日)\n10:00\t山田\thi\n"
+        p = self._incoming("[LINE] 山田とのトーク履歴 (3).txt", text)
+        _run(str(p))
+        self.assertTrue((ingest.CHATS_DIR / "山田.txt").exists())
+
+    def test_missing_file_errors(self):
+        rc, _, err = _run(str(self.incoming / "nai.txt"))
+        self.assertEqual(rc, 1)
+        self.assertIn("ファイルがありません", err)
+
+    def test_bom_input_handled(self):
+        text = "﻿" + _export("田中", "2026/07/12(日)\n10:00\t田中\tおはよう\n")
+        p = self._incoming("a.txt", text)
+        rc, out, _ = _run(str(p))
+        self.assertIn("updated=1", out)
+        self.assertIn("added_messages=1", out)
 
 
 if __name__ == "__main__":

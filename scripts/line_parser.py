@@ -170,9 +170,28 @@ def _strip_quotes(text: str) -> str:
     return text.replace('""', '"')
 
 
+def extract_chat_name(text: str, fallback: str = "unknown") -> str:
+    """ヘッダ行からトーク名を抜く。最初の日付行より前だけを見る。"""
+    for line in text.splitlines()[:10]:
+        line = line.rstrip("\r")
+        if _DATE_LINE.match(line):
+            break
+        for pat in _HEADER_NAME_PATTERNS:
+            m = pat.match(line)
+            if m:
+                return m.group(1).strip()
+    return fallback
+
+
+def fallback_name_from_filename(path: Path) -> str:
+    """ファイル名からトーク名の代替を作る（Drive の重複サフィックスも除去）。"""
+    name = re.sub(r"^\[LINE\]\s*", "", path.stem)
+    name = re.sub(r"\s*\(\d+\)$", "", name)  # 「... (1)」など Drive の重複保存
+    name = re.sub(r"とのトーク履歴$", "", name).strip()
+    return name or path.stem
+
+
 def parse_chat_file(path: Path) -> ChatLog:
     """txt ファイルをパースする。トーク名が取れない場合はファイル名を使う。"""
-    fallback = re.sub(r"^\[LINE\]\s*", "", path.stem)
-    fallback = re.sub(r"とのトーク履歴$", "", fallback).strip() or path.stem
     text = path.read_text(encoding="utf-8-sig")
-    return parse_chat_text(text, fallback_name=fallback)
+    return parse_chat_text(text, fallback_name=fallback_name_from_filename(path))
