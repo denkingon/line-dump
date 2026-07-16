@@ -43,18 +43,23 @@ class ChatLog:
 
 
 # ヘッダからトーク名を抜くパターン（上から順に試す）
+# 1:1 は「○○とのトーク履歴」、グループは「○○のトーク履歴」（「との」なし）。
+# 英語版は「Chat history with ○○」(1:1) /「Chat history in ○○」(グループ)で、
+# 「[LINE] 」プレフィックスが付かない変種もある。
 _HEADER_NAME_PATTERNS = [
-    re.compile(r"^\[LINE\]\s*(.+?)とのトーク履歴\s*$"),
-    re.compile(r"^\[LINE\]\s*Chat history (?:with|in) (.+?)\s*$", re.IGNORECASE),
-    re.compile(r"^(.+?)とのトーク履歴\s*$"),
+    re.compile(r"^\[LINE\]\s*(.+?)(?:との|の)?トーク履歴\s*$"),
+    re.compile(r"^(?:\[LINE\]\s*)?Chat history (?:with|in) (.+?)\s*$", re.IGNORECASE),
+    re.compile(r"^(.+?)(?:との|の)?トーク履歴\s*$"),
 ]
 
 _SAVED_AT = re.compile(r"^(?:保存日時|Saved on)\s*[:：]")
 
-# 日付行: 「2026/07/12(日)」「2026.07.12 土曜日」「2026年7月12日(日)」など
+# 日付行: 「2026/07/12(日)」「2026.07.12 土曜日」「2026年7月12日(日)」など。
+# 実際のエクスポートの日付行は日英とも必ず曜日付きなので、曜日を必須にして
+# メッセージ本文中の裸の日付（「2026/07/12」だけの行）を誤認しないようにする。
 _DATE_LINE = re.compile(
-    r"^(\d{4})[/.年](\d{1,2})[/.月](\d{1,2})日?"
-    r"(?:\s*\([^)]*\)|\s*[月火水木金土日]曜日|\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*)?\s*$"
+    r"^(\d{4})[/.年](\d{1,2})[/.月](\d{1,2})日?\s*"
+    r"(?:\([^)]*\)|[月火水木金土日]曜日|,?\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[A-Za-z]*)\s*$"
 )
 
 # 時刻行の先頭: 「10:21」「午後3:04」「10:21 AM」
@@ -87,12 +92,18 @@ def parse_chat_text(text: str, fallback_name: str = "unknown") -> ChatLog:
 
         # ── 複数行クオートの継続 ──
         if in_quote and chat.messages:
-            msg = chat.messages[-1]
-            msg.text += "\n" + line
-            if line.endswith('"'):
+            # 「"」で始まるだけの生メッセージ（クオートではない）を誤って
+            # 飲み込まないよう、時刻行/日付行が来たらクオートを打ち切って
+            # その行を通常処理に流す（テキストはそのまま確定）。
+            if _TIME_LINE.match(line) or _DATE_LINE.match(line):
                 in_quote = False
-                msg.text = _strip_quotes(msg.text)
-            continue
+            else:
+                msg = chat.messages[-1]
+                msg.text += "\n" + line
+                if line.endswith('"'):
+                    in_quote = False
+                    msg.text = _strip_quotes(msg.text)
+                continue
 
         # ── 日付行 ──
         m = _DATE_LINE.match(line)
@@ -184,10 +195,15 @@ def extract_chat_name(text: str, fallback: str = "unknown") -> str:
 
 
 def fallback_name_from_filename(path: Path) -> str:
-    """ファイル名からトーク名の代替を作る（Drive の重複サフィックスも除去）。"""
+    """ファイル名からトーク名の代替を作る（Drive の重複サフィックスも除去）。
+
+    実際のエクスポートのファイル名は「[LINE] ○○とのトーク.txt」(1:1) /
+    「[LINE] ○○のトーク.txt」(グループ)で、ヘッダ行と違い「履歴」は付かない。
+    どちらの形式でも剥がせるようにしておく。
+    """
     name = re.sub(r"^\[LINE\]\s*", "", path.stem)
     name = re.sub(r"\s*\(\d+\)$", "", name)  # 「... (1)」など Drive の重複保存
-    name = re.sub(r"とのトーク履歴$", "", name).strip()
+    name = re.sub(r"(?:との|の)?トーク(?:履歴)?$", "", name).strip()
     return name or path.stem
 
 

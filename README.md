@@ -11,8 +11,8 @@ LINE のトーク履歴（txt）を毎日 Cowork / Claude に届けるパイプ�
 └──────────────────────────────────────────────────────────┘
                      ↓  毎朝 07:00 JST（Claude Routine が自動発火）
 ┌─ Claude セッション ──────────────────────────────────────┐
-│ 1. Drive の LINE-exports から txt を取得                  │
-│    （同名タイトルが複数あれば最新版だけ）                 │
+│ 1. Drive の LINE-exports から全 txt を取得                │
+│    （古い重複エクスポートは取り込み側が自動で無視）       │
 │ 2. python3 scripts/ingest.py <取得した txt...>            │
 │    → chats/<トーク名>.txt を最新エクスポートで置き換え    │
 │ 3. git commit & push                                      │
@@ -32,8 +32,15 @@ LINE の「トーク履歴を送信」は毎回**全履歴**を出力する。�
 |---|---|
 | 前回より増えているだけ | 置き換え（通常ケース） |
 | 本文が同一（保存日時だけ違う） | 何もしない（コミットを汚さない） |
+| 取り込み済み内容の先頭部分と一致（古いエクスポート） | 静かに無視 |
 | 途中が変わっている（送信取消・削除） | 置き換え + 警告。前の版は git 履歴に残る |
 | 前回より**短い**（部分エクスポート等） | **スキップ + 警告**（データ消失ガード）。意図的なら `--force` |
+| 本文の**先頭から**違う（同名の別トーク） | `<名前> (2).txt` として**別ファイルに保存** + 警告 |
+| 本文が0行（空・壊れたファイル） | 無視 + 警告 |
+| 読めない（非UTF-8等） | そのファイルだけ error にして続行（rc=1） |
+
+同一トークかどうかは本文の先頭20行（アンカー）で判定する。LINE のエクスポートは
+毎回全履歴なので、同じトークなら先頭が一致し、別トークなら先頭から食い違う。
 
 ## なぜエクスポートだけ手動なのか
 
@@ -50,7 +57,7 @@ line-dump/
 ├── scripts/
 │   ├── ingest.py         エクスポート txt → chats/ 正本の更新
 │   ├── line_parser.py    LINE txt の構造化（トーク名抽出・行判定に使用）
-│   └── tests/            unittest（21件）
+│   └── tests/            unittest（26件）
 ├── chats/                トークごとの正本 txt（= Cowork への「送信物」）
 ├── config.json           Drive フォルダ ID などの設定
 └── docs/setup-iphone.md  iPhone 側のエクスポート手順
@@ -69,10 +76,10 @@ python3 scripts/ingest.py --force <エクスポート.txt>
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-出力の最終行は機械可読サマリ:
+出力の最終行は機械可読サマリ（読込失敗があれば rc=1）:
 
 ```
-SUMMARY: updated=<置き換え数> unchanged=<変化なし数> skipped=<スキップ数> added_lines=<追加行数> added_messages=<追加メッセージ数>
+SUMMARY: updated=<置き換え数> unchanged=<変化なし数> skipped=<スキップ数> errors=<読込失敗数> added_lines=<追加行数> added_messages=<追加メッセージ数>
 ```
 
 ## 日次 Routine（自動実行）の中身
@@ -82,7 +89,9 @@ Claude Code Remote の Routine が毎朝 07:00 JST（22:00 UTC）にセッショ
 なぞれば復旧できる。
 
 - Drive フォルダ: `LINE-exports`（ID は `config.json` 参照）
-- 取得した txt は一時ディレクトリに置き、`ingest.py` 経由でのみ `chats/` を更新する
+- フォルダ内の**全 txt** を一時ディレクトリに取得し、`ingest.py` 経由でのみ
+  `chats/` を更新する（古い重複エクスポートは「旧版」として静かに無視される
+  ので Drive の掃除は不要）
 - 更新ゼロの日は通知なしで静かに終了
 
 ## プライバシー
