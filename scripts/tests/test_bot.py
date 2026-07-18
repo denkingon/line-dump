@@ -188,6 +188,33 @@ class TestBotIngest(unittest.TestCase):
         self.assertIn("SUMMARY: chats=0 messages=0 cursor=42", out)
         self.assertEqual((bot_ingest.CURSOR_PATH).read_text().strip(), "42")
 
+    def test_slack_dir_and_label(self):
+        # --dir slack: 別ディレクトリ・独自カーソル(Slackのts文字列)・独自ヘッダ
+        payload = {
+            "next_cursor": "1771626089.297989",
+            "chats": [{"key": "slack:D083CBP73KK", "name": "Slackメモ", "messages": [
+                {"ts": "2026-07-18T12:00", "sender": "村田", "text": "メモ1"}]}],
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+            path = f.name
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = bot_ingest.main(["--dir", "slack", "--label", "Slack", path])
+        Path(path).unlink()
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("SUMMARY: chats=1 messages=1 cursor=1771626089.297989", out)
+        slack_dir = bot_ingest.REPO_ROOT / "slack"
+        content = (slack_dir / "Slackメモ.txt").read_text(encoding="utf-8")
+        self.assertTrue(content.startswith("[Slack] Slackメモ のアーカイブ\n"))
+        self.assertIn("12:00\t村田\tメモ1", content)
+        self.assertEqual((slack_dir / ".cursor").read_text().strip(),
+                         "1771626089.297989")
+        # bot/ 側の状態には触れない
+        self.assertFalse(bot_ingest.CURSOR_PATH.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

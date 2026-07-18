@@ -3,8 +3,14 @@
   "drive_folder_id": "1dAjvzN4akw6gof4YNWiRh7Qz-qLenODM",
   "drive_folder_url": "https://drive.google.com/drive/folders/1dAjvzN4akw6gof4YNWiRh7Qz-qLenODM",
   "sync_time_jst": "07:00",
+  "slack": {
+    "dm_channel_id": "D083CBP73KK",
+    "user_id": "U082ZLTPJ10",
+    "chat_name": "Slackメモ"
+  },
   "bot": {
     "export_url": "https://line-dump-bot.fly.dev/export",
-    "export_token": "4UbKkFhahGkuiVzcHRBUEA9PNUU2-tksU8oHRQml0GQ"
+    "export_token": "4UbKkFhahGkuiVzcHRBUEA9PNUU2-tksU8oHRQml0GQ",
+    "enabled": false
   }
 }

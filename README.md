@@ -5,33 +5,30 @@ LINE のトーク履歴（txt）を毎日 Cowork / Claude に届けるパイプ�
 
 ## 全体の流れ
 
-取り込み経路は2つ。どちらも毎朝 07:00 JST の Claude Routine が処理する。
+取り込み経路は3つ。すべて毎朝 07:00 JST の Claude Routine が処理する。
 
 ```
-【経路1: Bot（完全自動・グループ + Botとの1:1）】
-LINE グループ ─→ webhook ─→ Fly.io「line-dump-bot」が蓄積
-                              ↓ /export
-                     bot/<チャット名>.txt に追記
+【経路3: Slack 自分宛DM（完全自動・メモの取り込み口）】
+Slack の自分宛 DM に書く ─→ Slack API で新着取得
+                     ↓ bot_ingest.py --dir slack
+              slack/Slackメモ.txt に追記
 
-【経路2: 手動エクスポート（1:1トークも取れる唯一の方法）】
+【経路2: 手動エクスポート（LINEの1:1トークも取れる唯一の方法）】
 iPhone: LINE → トーク履歴を送信 → Google ドライブ「LINE-exports」
-                              ↓ ingest.py
-                     chats/<トーク名>.txt を最新版で置き換え
+                     ↓ ingest.py
+              chats/<トーク名>.txt を最新版で置き換え
 
-                     ↓ どちらも
-              git commit & push + 更新があればプッシュ通知
-┌─ Claude セッション（毎朝 07:00 JST に自動発火）─────────┐
-│ 1. Bot サーバーの /export から新着を取得 → bot/ に追記    │
-│ 2. Drive の LINE-exports から全 txt を取得 → ingest.py    │
-│    → chats/ を最新エクスポートで置き換え                  │
-│ 3. git commit & push                                      │
-│ 4. 更新があればプッシュ通知                               │
-└──────────────────────────────────────────────────────────┘
+【経路1: LINE Bot（任意・グループの完全自動化）】
+LINE グループ ─→ webhook ─→ Fly.io「line-dump-bot」が蓄積
+                     ↓ /export → bot_ingest.py
+              bot/<チャット名>.txt に追記
+
+              ↓ いずれも（毎朝 07:00 JST の Routine）
+       git commit & push + 更新があればプッシュ通知
 ```
 
-`chats/`（手動エクスポートの正本）と `bot/`（Bot の自動アーカイブ）が成果物。
-Cowork / Claude のセッションからも、clone したローカルからも常に読める。
-Bot のセットアップは `docs/setup-line-bot.md` 参照。
+`slack/`・`chats/`・`bot/` が成果物。Cowork / Claude のセッションからも、
+clone したローカルからも常に読める。Bot のセットアップは `docs/setup-line-bot.md` 参照。
 
 ## 更新ルール（ingest.py）
 
@@ -52,18 +49,21 @@ LINE の「トーク履歴を送信」は毎回**全履歴**を出力する。�
 同一トークかどうかは本文の先頭20行（アンカー）で判定する。LINE のエクスポートは
 毎回全履歴なので、同じトークなら先頭が一致し、別トークなら先頭から食い違う。
 
-## 2経路の使い分け
+## 経路の使い分け
 
 LINE には「他人との 1:1 トークを自動で外部に出す」公式 API が存在しない。
 Bot（Messaging API）が見えるのは **Bot が参加しているグループ** と
-**Bot 宛のメッセージ** だけ。そこで:
+**Bot 宛のメッセージ** だけ。Slack には普通に API がある。そこで:
 
 | 取りたいもの | 経路 |
 |---|---|
-| グループのトーク | **Bot をグループに招待** → 以降ずっと自動（経路1） |
-| 自分用メモ | **Bot と 1:1 で書く** → 自動（経路1） |
-| 友だちとの 1:1 トーク | 手動エクスポート → Drive（経路2）。毎回全履歴なのでサボっても抜けない |
+| 自分用メモ（いちばん手軽） | **Slack の自分宛 DM に書くだけ** → 毎朝自動で `slack/` に追記（経路3・稼働中） |
+| 友だちとの 1:1 トーク | 手動エクスポート → Drive（経路2・稼働中）。毎回全履歴なのでサボっても抜けない |
+| グループのトーク | 手動エクスポート（経路2）。完全自動にしたければ Bot をグループに招待（経路1・任意） |
 | Bot 参加前のグループ履歴 | 手動エクスポートで補完（経路2） |
+
+経路1（LINE Bot）は実装済みだがデプロイは任意（`docs/setup-line-bot.md`）。
+グループに Bot を入れることが必須なので、使うかどうかは好みで。
 
 ## ディレクトリ構造
 
@@ -79,8 +79,9 @@ line-dump/
 │   ├── fly.toml          Fly.io 設定（app: line-dump-bot）
 │   └── Dockerfile
 ├── chats/                手動エクスポートの正本 txt（トークごと・常に全履歴）
-├── bot/                  Bot の自動アーカイブ txt（+ .cursor / .chats.json）
-├── config.json           Drive フォルダ ID・Bot エンドポイントなどの設定
+├── slack/                Slack 自分宛DM の自動アーカイブ txt
+├── bot/                  LINE Bot の自動アーカイブ txt（Bot利用時のみ）
+├── config.json           Drive フォルダ ID・Slack DM ID・Bot 設定
 └── docs/
     ├── setup-iphone.md   手動エクスポートの手順
     └── setup-line-bot.md Bot（完全自動）のセットアップ手順
