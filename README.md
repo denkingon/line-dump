@@ -5,23 +5,33 @@ LINE のトーク履歴（txt）を毎日 Cowork / Claude に届けるパイプ�
 
 ## 全体の流れ
 
+取り込み経路は2つ。どちらも毎朝 07:00 JST の Claude Routine が処理する。
+
 ```
-┌─ iPhone ────────────────────────────────────────────────┐
-│ LINE → トーク履歴を送信 → Google ドライブ「LINE-exports」 │  ← 唯一の手動ステップ
-└──────────────────────────────────────────────────────────┘
-                     ↓  毎朝 07:00 JST（Claude Routine が自動発火）
-┌─ Claude セッション ──────────────────────────────────────┐
-│ 1. Drive の LINE-exports から全 txt を取得                │
-│    （古い重複エクスポートは取り込み側が自動で無視）       │
-│ 2. python3 scripts/ingest.py <取得した txt...>            │
-│    → chats/<トーク名>.txt を最新エクスポートで置き換え    │
+【経路1: Bot（完全自動・グループ + Botとの1:1）】
+LINE グループ ─→ webhook ─→ Fly.io「line-dump-bot」が蓄積
+                              ↓ /export
+                     bot/<チャット名>.txt に追記
+
+【経路2: 手動エクスポート（1:1トークも取れる唯一の方法）】
+iPhone: LINE → トーク履歴を送信 → Google ドライブ「LINE-exports」
+                              ↓ ingest.py
+                     chats/<トーク名>.txt を最新版で置き換え
+
+                     ↓ どちらも
+              git commit & push + 更新があればプッシュ通知
+┌─ Claude セッション（毎朝 07:00 JST に自動発火）─────────┐
+│ 1. Bot サーバーの /export から新着を取得 → bot/ に追記    │
+│ 2. Drive の LINE-exports から全 txt を取得 → ingest.py    │
+│    → chats/ を最新エクスポートで置き換え                  │
 │ 3. git commit & push                                      │
-│ 4. 更新があればプッシュ通知（ファイル名と追加件数）       │
+│ 4. 更新があればプッシュ通知                               │
 └──────────────────────────────────────────────────────────┘
 ```
 
-`chats/` が正本。Cowork / Claude のセッションからも、リポジトリを clone した
-ローカルからも、常に最新のトーク履歴 txt が読める。
+`chats/`（手動エクスポートの正本）と `bot/`（Bot の自動アーカイブ）が成果物。
+Cowork / Claude のセッションからも、clone したローカルからも常に読める。
+Bot のセットアップは `docs/setup-line-bot.md` 参照。
 
 ## 更新ルール（ingest.py）
 
@@ -42,44 +52,63 @@ LINE の「トーク履歴を送信」は毎回**全履歴**を出力する。�
 同一トークかどうかは本文の先頭20行（アンカー）で判定する。LINE のエクスポートは
 毎回全履歴なので、同じトークなら先頭が一致し、別トークなら先頭から食い違う。
 
-## なぜエクスポートだけ手動なのか
+## 2経路の使い分け
 
-LINE にはトーク履歴を自動で外部に出す API が存在しない。公式の出口は
-「トーク履歴を送信」で txt を共有することだけ。
+LINE には「他人との 1:1 トークを自動で外部に出す」公式 API が存在しない。
+Bot（Messaging API）が見えるのは **Bot が参加しているグループ** と
+**Bot 宛のメッセージ** だけ。そこで:
 
-- **手動なのは「Drive に保存」だけ**。毎日でも週1でもいい。
-- エクスポートは毎回全履歴なので、間隔が空いても抜け漏れは起きない。
+| 取りたいもの | 経路 |
+|---|---|
+| グループのトーク | **Bot をグループに招待** → 以降ずっと自動（経路1） |
+| 自分用メモ | **Bot と 1:1 で書く** → 自動（経路1） |
+| 友だちとの 1:1 トーク | 手動エクスポート → Drive（経路2）。毎回全履歴なのでサボっても抜けない |
+| Bot 参加前のグループ履歴 | 手動エクスポートで補完（経路2） |
 
 ## ディレクトリ構造
 
 ```
 line-dump/
 ├── scripts/
-│   ├── ingest.py         エクスポート txt → chats/ 正本の更新
+│   ├── ingest.py         手動エクスポート txt → chats/ 正本の更新
+│   ├── bot_ingest.py     Bot /export JSON → bot/ アーカイブへ追記
 │   ├── line_parser.py    LINE txt の構造化（トーク名抽出・行判定に使用）
-│   └── tests/            unittest（26件）
-├── chats/                トークごとの正本 txt（= Cowork への「送信物」）
-├── config.json           Drive フォルダ ID などの設定
-└── docs/setup-iphone.md  iPhone 側のエクスポート手順
+│   └── tests/            unittest（34件）
+├── server/               LINE Bot webhook サーバー（Fly.io・標準ライブラリのみ）
+│   ├── app.py            署名検証 + イベント蓄積 + /export API
+│   ├── fly.toml          Fly.io 設定（app: line-dump-bot）
+│   └── Dockerfile
+├── chats/                手動エクスポートの正本 txt（トークごと・常に全履歴）
+├── bot/                  Bot の自動アーカイブ txt（+ .cursor / .chats.json）
+├── config.json           Drive フォルダ ID・Bot エンドポイントなどの設定
+└── docs/
+    ├── setup-iphone.md   手動エクスポートの手順
+    └── setup-line-bot.md Bot（完全自動）のセットアップ手順
 ```
 
 ## コマンド
 
 ```bash
-# 取り込み（Routine が毎朝実行するのと同じもの）
+# 手動エクスポートの取り込み（Routine が毎朝実行するのと同じもの）
 python3 scripts/ingest.py <エクスポート.txt> [...]
 
 # 前回より短いエクスポートで強制置き換え
 python3 scripts/ingest.py --force <エクスポート.txt>
 
+# Bot 新着の取り込み（Routine が毎朝実行するのと同じもの）
+curl -s -H "Authorization: Bearer <EXPORT_TOKEN>" \
+  "https://line-dump-bot.fly.dev/export?since=$(cat bot/.cursor 2>/dev/null || echo 0)" \
+  | python3 scripts/bot_ingest.py -
+
 # テスト
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-出力の最終行は機械可読サマリ（読込失敗があれば rc=1）:
+出力の最終行は機械可読サマリ:
 
 ```
-SUMMARY: updated=<置き換え数> unchanged=<変化なし数> skipped=<スキップ数> errors=<読込失敗数> added_lines=<追加行数> added_messages=<追加メッセージ数>
+ingest.py:     SUMMARY: updated=... unchanged=... skipped=... errors=... added_lines=... added_messages=...  （errors>0 なら rc=1）
+bot_ingest.py: SUMMARY: chats=... messages=... cursor=...
 ```
 
 ## 日次 Routine（自動実行）の中身
@@ -92,9 +121,13 @@ Claude Code Remote の Routine が毎朝 07:00 JST（22:00 UTC）にセッショ
 - フォルダ内の**全 txt** を一時ディレクトリに取得し、`ingest.py` 経由でのみ
   `chats/` を更新する（古い重複エクスポートは「旧版」として静かに無視される
   ので Drive の掃除は不要）
+- Bot サーバーには `bot/.cursor` 以降の新着だけを問い合わせる。サーバーが
+  未デプロイ・停止中なら静かにスキップ
 - 更新ゼロの日は通知なしで静かに終了
 
 ## プライバシー
 
-このリポジトリには **LINE のトーク内容がそのまま** 入る（chats/）。
+このリポジトリには **LINE のトーク内容がそのまま** 入る（chats/ と bot/）。
+`config.json` には Bot の /export 用トークンも含まれる。
 必ず private リポジトリのまま運用すること。公開・共有は厳禁。
+グループに Bot を入れる際は、記録されることを他のメンバーに伝えること。

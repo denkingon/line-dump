@@ -2,5 +2,9 @@
   "drive_folder_name": "LINE-exports",
   "drive_folder_id": "1dAjvzN4akw6gof4YNWiRh7Qz-qLenODM",
   "drive_folder_url": "https://drive.google.com/drive/folders/1dAjvzN4akw6gof4YNWiRh7Qz-qLenODM",
-  "sync_time_jst": "07:00"
+  "sync_time_jst": "07:00",
+  "bot": {
+    "export_url": "https://line-dump-bot.fly.dev/export",
+    "export_token": "4UbKkFhahGkuiVzcHRBUEA9PNUU2-tksU8oHRQml0GQ"
+  }
 }

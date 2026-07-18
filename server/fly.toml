@@ -1,0 +1,39 @@
+# LINE Bot webhook サーバーの Fly.io 設定。
+# デプロイ手順は ../docs/setup-line-bot.md 参照。
+# secrets (fly secrets set):
+#   LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN / EXPORT_TOKEN
+
+app = "line-dump-bot"
+primary_region = "nrt"
+
+[build]
+  # ./Dockerfile を使用
+
+[env]
+  DATA_DIR = "/data"
+  PORT = "8080"
+  BIND_HOST = "0.0.0.0"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # webhook をいつでも受けられるよう常時起動（brain-dump と同じ方針）
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    timeout = "10s"
+    path = "/health"
+
+[[mounts]]
+  source = "line_bot_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
