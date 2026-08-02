@@ -151,6 +151,51 @@ class TestParser(unittest.TestCase):
         self.assertGreaterEqual(chat.skipped_lines, 1)
 
 
+MAC_SAMPLE = """\
+2024.03.31 日曜日
+18:04 H Village はじめまして！H Villageです。
+友だち追加ありがとうございます
+2024.04.03 水曜日
+09:25 H Village 画像
+"""
+
+
+class TestMacFormat(unittest.TestCase):
+    """Mac 版アプリの「トークを保存」形式（スペース区切り・ヘッダ無し）。"""
+
+    def test_messages_parsed(self):
+        chat = parse_chat_text(MAC_SAMPLE)
+        self.assertEqual(len(chat.messages), 2)
+        self.assertEqual(chat.messages[0].ts, datetime(2024, 3, 31, 18, 4))
+        # 送信者と本文はスペースで分離できないため text にまとめて持つ
+        self.assertEqual(
+            chat.messages[0].text,
+            "H Village はじめまして！H Villageです。\n友だち追加ありがとうございます",
+        )
+        self.assertEqual(chat.messages[1].ts, datetime(2024, 4, 3, 9, 25))
+
+    def test_count_messages_both_formats(self):
+        self.assertEqual(ingest.count_messages(ingest.content_lines(MAC_SAMPLE)), 2)
+        self.assertEqual(ingest.count_messages(ingest.content_lines(IOS_SAMPLE)), 6)
+
+    def test_am_pm_text_not_counted_as_message(self):
+        # 英文中の「9:00 AM」は時が1桁なのでメッセージ行と誤検出しない
+        from line_parser import is_message_line
+        self.assertFalse(is_message_line("9:00 AM meeting starts"))
+        self.assertTrue(is_message_line("09:00 Alice 会議です"))
+
+    def test_mac_filenames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for fname, expected in [
+                ("[LINE]H Village.txt", "H Village"),
+                ("[LINE] Chat with Berry.txt", "Berry"),
+                ("[LINE]H Village 2.txt", "H Village"),
+            ]:
+                p = Path(tmp) / fname
+                p.write_text(MAC_SAMPLE, encoding="utf-8")
+                self.assertEqual(parse_chat_file(p).name, expected, msg=fname)
+
+
 def _export(name: str, body: str, saved_at: str = "2026/07/14 10:00",
             group: bool = False) -> str:
     joint = "の" if group else "との"
@@ -369,6 +414,22 @@ class TestIngest(unittest.TestCase):
         rc, out, _ = _run(str(p))
         self.assertIn("updated=1", out)
         self.assertIn("added_messages=1", out)
+
+    def test_mac_export_ingested(self):
+        # Mac 版の書き出し（ヘッダ無し・スペース区切り）も取り込める
+        p = self._incoming("[LINE]H Village.txt", MAC_SAMPLE)
+        rc, out, _ = _run(str(p))
+        self.assertEqual(rc, 0)
+        self.assertIn("added_messages=2", out)
+        dest = ingest.CHATS_DIR / "H Village.txt"
+        self.assertEqual(dest.read_text(encoding="utf-8"), MAC_SAMPLE)
+        # 追記された再エクスポート → 差分が正しく数えられる
+        p2 = self._incoming("[LINE]H Village.txt",
+                            MAC_SAMPLE + "10:00 H Village 新着です\n", mtime=9000)
+        rc, out, err = _run(str(p2))
+        self.assertIn("updated=1", out)
+        self.assertIn("added_messages=1", out)
+        self.assertEqual(err, "")
 
 
 if __name__ == "__main__":

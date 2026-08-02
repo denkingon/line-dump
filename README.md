@@ -5,30 +5,54 @@ LINE のトーク履歴（txt）を毎日 Cowork / Claude に届けるパイプ�
 
 ## 全体の流れ
 
-取り込み経路は3つ。すべて毎朝 07:00 JST の Claude Routine が処理する。
+取り込み経路は4つ。**経路0（Mac 自動）だけで LINE は完全無人**になる。
 
 ```
+【経路0: Mac 自動書き出し ★本命・操作ゼロ】
+毎日 07:00  Hammerspoon が Mac 版 LINE を操作
+  → ⋮ →「トークを保存」→ [LINE]<トーク名>.txt
+  → mac/sync.sh: ingest.py → commit → push
+              chats/<トーク名>.txt が最新に
+
 【経路3: Slack 自分宛DM（完全自動・メモの取り込み口）】
 Slack の自分宛 DM に書く ─→ Slack API で新着取得
                      ↓ bot_ingest.py --dir slack
               slack/Slackメモ.txt に追記
 
-【経路2: 手動エクスポート（LINEの1:1トークも取れる唯一の方法）】
+【経路2: 手動エクスポート（Mac が使えないときの保険）】
 iPhone: LINE → トーク履歴を送信 → Google ドライブ「LINE-exports」
                      ↓ ingest.py
               chats/<トーク名>.txt を最新版で置き換え
 
-【経路1: LINE Bot（任意・グループの完全自動化）】
+【経路1: LINE Bot（任意・グループのリアルタイム取り込み）】
 LINE グループ ─→ webhook ─→ Fly.io「line-dump-bot」が蓄積
                      ↓ /export → bot_ingest.py
               bot/<チャット名>.txt に追記
 
-              ↓ いずれも（毎朝 07:00 JST の Routine）
-       git commit & push + 更新があればプッシュ通知
+  経路1〜3 は毎朝 07:00 JST の Claude Routine が処理し、
+  経路0 は Mac 側で完結して直接 push する
 ```
 
-`slack/`・`chats/`・`bot/` が成果物。Cowork / Claude のセッションからも、
-clone したローカルからも常に読める。Bot のセットアップは `docs/setup-line-bot.md` 参照。
+`chats/`・`slack/`・`bot/` が成果物。Cowork / Claude のセッションからも、
+clone したローカルからも常に読める。
+
+- Mac 自動化: `docs/setup-mac-auto.md` ★おすすめ
+- Slack: 自分宛 DM に書くだけ（設定済み）
+- iPhone 手動: `docs/setup-iphone.md`
+- LINE Bot: `docs/setup-line-bot.md`
+
+## LINE の書き出し形式は2種類ある
+
+同じ「トーク履歴」でも出力が違う。どちらも取り込めるようにしてある。
+
+| | 日付行 | メッセージ行 | ヘッダ |
+|---|---|---|---|
+| **スマホ版**（トーク履歴を送信） | `2026/07/12(日)` | `10:21<TAB>送信者<TAB>本文` | あり |
+| **Mac 版**（トークを保存） | `2024.03.31 日曜日` | `18:04 送信者 本文`（スペース） | なし |
+
+Mac 版は送信者と本文がスペース区切りで機械的に分離できないため、送信者名まで
+分けたい場合は `line-chat-export` スキルの `normalize_line.py` を使うこと。
+このリポジトリは txt を原文のまま保持するのが役目なので、分離はしていない。
 
 ## 更新ルール（ingest.py）
 
@@ -51,40 +75,46 @@ LINE の「トーク履歴を送信」は毎回**全履歴**を出力する。�
 
 ## 経路の使い分け
 
-LINE には「他人との 1:1 トークを自動で外部に出す」公式 API が存在しない。
-Bot（Messaging API）が見えるのは **Bot が参加しているグループ** と
-**Bot 宛のメッセージ** だけ。Slack には普通に API がある。そこで:
-
 | 取りたいもの | 経路 |
 |---|---|
-| 自分用メモ（いちばん手軽） | **Slack の自分宛 DM に書くだけ** → 毎朝自動で `slack/` に追記（経路3・稼働中） |
-| 友だちとの 1:1 トーク | 手動エクスポート → Drive（経路2・稼働中）。毎回全履歴なのでサボっても抜けない |
-| グループのトーク | 手動エクスポート（経路2）。完全自動にしたければ Bot をグループに招待（経路1・任意） |
-| Bot 参加前のグループ履歴 | 手動エクスポートで補完（経路2） |
+| **LINE のトーク全般（1:1 もグループも）** | **経路0: Mac 自動書き出し**。Mac の GUI 操作なら 1:1 も取れる。設定後は操作ゼロ |
+| 自分用メモ | 経路3: Slack の自分宛 DM に書くだけ → 毎朝 `slack/` に追記 |
+| Mac が使えない期間の補完 | 経路2: iPhone から手動エクスポート → Drive |
+| グループをリアルタイムで | 経路1: LINE Bot（任意）。招待が必要な代わりに即時 |
 
-経路1（LINE Bot）は実装済みだがデプロイは任意（`docs/setup-line-bot.md`）。
-グループに Bot を入れることが必須なので、使うかどうかは好みで。
+**なぜ Mac の画面操作なのか**: LINE にはトーク履歴を取得する API が無く、
+Messaging API も Bot 宛の新規メッセージしか見えない。アプリの
+「⋮ →トークを保存」だけが唯一の出口なので、そこを自動化するのが本筋になる。
+
+**Mac 自動化の限界**（LINE 側の仕様で回避できない）:
+- 実行時刻に Mac が起動・ログイン状態である必要がある
+- **画面に読み込まれている分だけ**が保存される。古い履歴が欲しいトークは
+  初回だけ手動で上にスクロールして読み込ませる
 
 ## ディレクトリ構造
 
 ```
 line-dump/
 ├── scripts/
-│   ├── ingest.py         手動エクスポート txt → chats/ 正本の更新
-│   ├── bot_ingest.py     Bot /export JSON → bot/ アーカイブへ追記
+│   ├── ingest.py         書き出し txt → chats/ 正本の更新（スマホ版/Mac版 両対応）
+│   ├── bot_ingest.py     JSON → bot/ ・ slack/ アーカイブへ追記
 │   ├── line_parser.py    LINE txt の構造化（トーク名抽出・行判定に使用）
-│   └── tests/            unittest（34件）
+│   └── tests/            unittest（40件）
+├── mac/                  Mac 側の自動書き出し（経路0）
+│   ├── line_export.lua   Hammerspoon: 毎日 LINE を操作して書き出す
+│   └── sync.sh           書き出した txt を取り込んで commit & push
 ├── server/               LINE Bot webhook サーバー（Fly.io・標準ライブラリのみ）
 │   ├── app.py            署名検証 + イベント蓄積 + /export API
 │   ├── fly.toml          Fly.io 設定（app: line-dump-bot）
 │   └── Dockerfile
-├── chats/                手動エクスポートの正本 txt（トークごと・常に全履歴）
+├── chats/                LINE トークの正本 txt（トークごと・常に全履歴）
 ├── slack/                Slack 自分宛DM の自動アーカイブ txt
 ├── bot/                  LINE Bot の自動アーカイブ txt（Bot利用時のみ）
 ├── config.json           Drive フォルダ ID・Slack DM ID・Bot 設定
 └── docs/
-    ├── setup-iphone.md   手動エクスポートの手順
-    └── setup-line-bot.md Bot（完全自動）のセットアップ手順
+    ├── setup-mac-auto.md Mac 完全自動化（★おすすめ）
+    ├── setup-iphone.md   iPhone からの手動エクスポート
+    └── setup-line-bot.md LINE Bot のセットアップ
 ```
 
 ## コマンド

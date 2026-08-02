@@ -33,9 +33,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from line_parser import (  # noqa: E402
     _DATE_LINE,
-    _TIME_LINE,
     extract_chat_name,
     fallback_name_from_filename,
+    is_message_line,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -71,8 +71,8 @@ def content_lines(text: str) -> list[str]:
 
 
 def count_messages(lines: list[str]) -> int:
-    """メッセージ行（時刻で始まる行）の数を数える。"""
-    return sum(1 for ln in lines if _TIME_LINE.match(ln))
+    """メッセージ行（時刻で始まる行）の数を数える。スマホ版/Mac版の両形式。"""
+    return sum(1 for ln in lines if is_message_line(ln))
 
 
 def _same_talk(a: list[str], b: list[str]) -> bool:

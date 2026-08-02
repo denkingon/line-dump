@@ -62,11 +62,22 @@ _DATE_LINE = re.compile(
     r"(?:\([^)]*\)|[月火水木金土日]曜日|,?\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[A-Za-z]*)\s*$"
 )
 
-# 時刻行の先頭: 「10:21」「午後3:04」「10:21 AM」
+# 時刻行の先頭（スマホ版エクスポート・タブ区切り）: 「10:21」「午後3:04」「10:21 AM」
 _TIME_LINE = re.compile(
     r"^(?:(午前|午後)\s*)?(\d{1,2}):(\d{2})(?:\s*(AM|PM))?\t(.*)$",
     re.IGNORECASE,
 )
+
+# 時刻行（Mac版アプリの「トークを保存」）: 「18:04 送信者 本文」
+# タブが無く半角スペース区切り。時は必ず2桁ゼロ埋めなので、そこを固定して
+# 本文中の「9:00 AM」のような表記をメッセージ行と誤検出しないようにする。
+# 送信者と本文はスペースでは機械的に分離できないため、まとめて扱う。
+_TIME_LINE_MAC = re.compile(r"^([01]\d|2[0-3]):([0-5]\d) (\S.*)$")
+
+
+def is_message_line(line: str) -> bool:
+    """スマホ版・Mac版どちらの形式でもメッセージ開始行なら True。"""
+    return bool(_TIME_LINE.match(line) or _TIME_LINE_MAC.match(line))
 
 
 def _to_hour24(hour: int, ampm: str | None) -> int:
@@ -143,6 +154,20 @@ def parse_chat_text(text: str, fallback_name: str = "unknown") -> ChatLog:
             chat.messages.append(Message(ts=ts, sender=sender, text=body))
             continue
 
+        # ── 時刻行（Mac版アプリ形式）──
+        m = _TIME_LINE_MAC.match(line)
+        if m and current_date is not None:
+            hh, mm, rest = m.groups()
+            ts = datetime(
+                current_date.year, current_date.month, current_date.day,
+                int(hh), int(mm),
+            )
+            # Mac版は「送信者 本文」がスペース区切りで分離できないため、
+            # sender は立てずに丸ごと text に持つ（詳細な分離が必要な場合は
+            # line-chat-export スキルの normalize_line.py を使うこと）。
+            chat.messages.append(Message(ts=ts, sender=None, text=rest))
+            continue
+
         # ── ヘッダ行（最初のメッセージより前のみ）──
         if not chat.messages and current_date is None:
             if not line.strip() or _SAVED_AT.match(line):
@@ -199,10 +224,13 @@ def fallback_name_from_filename(path: Path) -> str:
 
     実際のエクスポートのファイル名は「[LINE] ○○とのトーク.txt」(1:1) /
     「[LINE] ○○のトーク.txt」(グループ)で、ヘッダ行と違い「履歴」は付かない。
-    どちらの形式でも剥がせるようにしておく。
+    Mac 版アプリは「[LINE]○○.txt」「[LINE] Chat with ○○.txt」の2系統。
+    どの形式でも剥がせるようにしておく。
     """
     name = re.sub(r"^\[LINE\]\s*", "", path.stem)
+    name = re.sub(r"^Chat with\s+", "", name, flags=re.IGNORECASE)  # Mac 版英語表示
     name = re.sub(r"\s*\(\d+\)$", "", name)  # 「... (1)」など Drive の重複保存
+    name = re.sub(r"\s+\d+$", "", name)      # 「... 2」など macOS の重複保存
     name = re.sub(r"(?:との|の)?トーク(?:履歴)?$", "", name).strip()
     return name or path.stem
 

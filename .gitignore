@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Mac 側同期スクリプトのログ（リポジトリ内に置くが履歴には残さない）
+mac/sync.log
