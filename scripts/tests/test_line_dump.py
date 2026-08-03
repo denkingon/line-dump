@@ -190,10 +190,106 @@ class TestMacFormat(unittest.TestCase):
                 ("[LINE]H Village.txt", "H Village"),
                 ("[LINE] Chat with Berry.txt", "Berry"),
                 ("[LINE]H Village 2.txt", "H Village"),
+                # 書き出し日スタンプ付き（日ごとのスナップショット運用）
+                ("[LINE]p Koyo_20260803.txt", "p Koyo"),
+                ("[LINE] Chat with Berry_20260728.txt", "Berry"),
+                ("[LINE]H Village 20260803.txt", "H Village"),
+                ("[LINE]H Village_20260803 2.txt", "H Village"),
             ]:
                 p = Path(tmp) / fname
                 p.write_text(MAC_SAMPLE, encoding="utf-8")
                 self.assertEqual(parse_chat_file(p).name, expected, msg=fname)
+
+    def test_truncated_snapshot_merges_instead_of_splitting(self):
+        # スクロール不足で先頭が欠けたスナップショット（自動実行で普通に起きる）は
+        # 別トークにせず、重なりを見つけて末尾の新着だけを足す
+        tmp = Path(tempfile.mkdtemp())
+        orig = (ingest.REPO_ROOT, ingest.CHATS_DIR)
+        ingest.REPO_ROOT, ingest.CHATS_DIR = tmp, tmp / "chats"
+        try:
+            full = "2026.07.01 水曜日\n" + "".join(
+                f"{h:02d}:00 田中 メッセージ{h}\n" for h in range(10, 23))
+            first = tmp / "[LINE]田中_20260801.txt"
+            first.write_text(full, encoding="utf-8")
+            _run(str(first))
+
+            # 翌日: 先頭が欠け（12:00 から）、末尾に新着2件
+            truncated = "2026.07.01 水曜日\n" + "".join(
+                f"{h:02d}:00 田中 メッセージ{h}\n" for h in range(12, 23)) + (
+                "2026.07.02 木曜日\n09:00 田中 新着A\n09:01 田中 新着B\n")
+            second = tmp / "[LINE]田中_20260802.txt"
+            second.write_text(truncated, encoding="utf-8")
+            rc, out, err = _run(str(second))
+
+            self.assertEqual(rc, 0)
+            self.assertIn("updated=1", out)
+            self.assertIn("結合", out)
+            self.assertEqual(err, "")
+            files = sorted(p.name for p in ingest.CHATS_DIR.iterdir())
+            self.assertEqual(files, ["田中.txt"])   # (2) を作らない
+            body = (ingest.CHATS_DIR / "田中.txt").read_text(encoding="utf-8")
+            self.assertIn("メッセージ10", body)     # 古い履歴が残っている
+            self.assertIn("新着B", body)            # 新着も入っている
+            self.assertEqual(body.count("メッセージ12"), 1)  # 重複していない
+        finally:
+            ingest.REPO_ROOT, ingest.CHATS_DIR = orig
+            shutil.rmtree(tmp)
+
+    def test_merge_bodies_rejects_unrelated(self):
+        a = [f"{h:02d}:00 田中 A{h}" for h in range(10, 25)]
+        b = [f"{h:02d}:00 佐藤 B{h}" for h in range(10, 25)]
+        self.assertIsNone(ingest.merge_bodies(a, b))
+
+    def test_merge_bodies_extends_front(self):
+        # 前回より前まで遡れたスナップショット（上にスクロールした場合）
+        old = [f"{h:02d}:00 田中 M{h}" for h in range(15, 25)]
+        new = [f"{h:02d}:00 田中 M{h}" for h in range(10, 25)]
+        self.assertEqual(ingest.merge_bodies(old, new), new)
+
+    def test_snapshot_key_prefers_filename_date(self):
+        # コピー等で mtime が狂っていても、ファイル名の日付が新しい方を後に処理する
+        from line_parser import snapshot_key, snapshot_stamp
+        with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp) / "[LINE]A_20260801.txt"
+            new = Path(tmp) / "[LINE]A_20260803.txt"
+            old.write_text(MAC_SAMPLE, encoding="utf-8")
+            new.write_text(MAC_SAMPLE, encoding="utf-8")
+            os.utime(old, (9_000_000_000, 9_000_000_000))  # 古い方の mtime を未来に
+            os.utime(new, (1000, 1000))
+            self.assertEqual(snapshot_stamp(new), "20260803")
+            self.assertEqual(sorted([old, new], key=snapshot_key), [old, new])
+
+    def test_daily_snapshots_merge_into_one_chat(self):
+        # 日ごとのスナップショットが溜まっても chats/ は1トーク1ファイル
+        tmp = Path(tempfile.mkdtemp())
+        orig = (ingest.REPO_ROOT, ingest.CHATS_DIR)
+        ingest.REPO_ROOT, ingest.CHATS_DIR = tmp, tmp / "chats"
+        try:
+            day1 = tmp / "[LINE]H Village_20260801.txt"
+            day1.write_text(MAC_SAMPLE, encoding="utf-8")
+            day2 = tmp / "[LINE]H Village_20260803.txt"
+            day2.write_text(MAC_SAMPLE + "10:00 H Village 新着\n", encoding="utf-8")
+            # 引数順が逆でも、日付の新しい方が最終的に採用される
+            rc, out, _ = _run(str(day2), str(day1))
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                sorted(p.name for p in ingest.CHATS_DIR.iterdir()), ["H Village.txt"])
+            final = (ingest.CHATS_DIR / "H Village.txt").read_text(encoding="utf-8")
+            self.assertIn("新着", final)
+
+            # 翌日以降もアーカイブ全体を渡すが、古いスナップショットは
+            # 「旧版」として無視され、正本を巻き戻さない
+            rc, out, err = _run(str(day2), str(day1))
+            self.assertEqual(rc, 0)
+            self.assertIn("updated=0", out)
+            self.assertIn("unchanged=2", out)
+            self.assertIn("旧版", out)
+            self.assertEqual(err, "")
+            self.assertEqual(
+                (ingest.CHATS_DIR / "H Village.txt").read_text(encoding="utf-8"), final)
+        finally:
+            ingest.REPO_ROOT, ingest.CHATS_DIR = orig
+            shutil.rmtree(tmp)
 
 
 def _export(name: str, body: str, saved_at: str = "2026/07/14 10:00",
@@ -296,7 +392,7 @@ class TestIngest(unittest.TestCase):
         rc, out, err = _run(str(self._incoming("b.txt", short_diverged)))
         self.assertEqual(rc, 0)
         self.assertIn("skipped=1", out)
-        self.assertIn("短い", err)
+        self.assertIn("短く、重なりも見つからない", err)
         self.assertEqual(
             (ingest.CHATS_DIR / "田中.txt").read_text(encoding="utf-8"), long_text)
 

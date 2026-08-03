@@ -36,6 +36,7 @@ from line_parser import (  # noqa: E402
     extract_chat_name,
     fallback_name_from_filename,
     is_message_line,
+    snapshot_key,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +48,11 @@ _UNSAFE_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 # 同じトークは先頭が一致し、別トークは最初の数行で必ず食い違う。
 ANCHOR_LINES = 20
 
+# 先頭が欠けたスナップショット同士をつなぐときに、重なりとみなす最小行数。
+# 短すぎると別トークの定型あいさつ等で誤接合しうるので、時刻付きの行が
+# 数行そろって一致することを要求する。
+OVERLAP_LINES = 8
+
 
 def warn(msg: str) -> None:
     print(f"warn: {msg}", file=sys.stderr)
@@ -57,17 +63,23 @@ def safe_filename(name: str) -> str:
     return name or "unknown"
 
 
-def content_lines(text: str) -> list[str]:
-    """ヘッダ（最初の日付行より前）を除いた本文行を返す。
+def split_header(text: str) -> tuple[str, list[str]]:
+    """(ヘッダ, 本文行) に分ける。本文は最初の日付行から。
 
-    「保存日時：...」はエクスポートのたびに変わるので、新旧比較はこの
-    本文行だけで行う。改行コード差も吸収する。
+    「保存日時：...」はエクスポートのたびに変わるので、新旧比較は本文行
+    だけで行う。改行コード差もここで吸収する。Mac 版はヘッダを持たない。
     """
     lines = [ln.rstrip("\r") for ln in text.splitlines()]
     for i, ln in enumerate(lines):
         if _DATE_LINE.match(ln):
-            return lines[i:]
-    return []
+            header = "\n".join(lines[:i]) + "\n" if i else ""
+            return header, lines[i:]
+    return text, []
+
+
+def content_lines(text: str) -> list[str]:
+    """ヘッダを除いた本文行を返す。"""
+    return split_header(text)[1]
 
 
 def count_messages(lines: list[str]) -> int:
@@ -75,12 +87,72 @@ def count_messages(lines: list[str]) -> int:
     return sum(1 for ln in lines if is_message_line(ln))
 
 
+def _find_block(hay: list[str], needle: list[str]) -> int:
+    """hay の中で needle と完全一致する最初の位置。無ければ -1。"""
+    n = len(needle)
+    if n == 0 or n > len(hay):
+        return -1
+    first = needle[0]
+    for i in range(len(hay) - n + 1):
+        if hay[i] == first and hay[i:i + n] == needle:
+            return i
+    return -1
+
+
+def merge_bodies(old: list[str], new: list[str]) -> list[str] | None:
+    """同じトークの2つのスナップショットを結合する。無関係なら None。
+
+    Mac 版の書き出しは「画面に読み込まれている範囲」しか出ないため、
+    先頭が欠けた（途中から始まる）スナップショットが普通に発生する。
+    重なりを見つけて連結し、履歴を落とさずに新着だけを足す。
+
+    重なりは「一方の端が他方の中に現れるか」で探す。切り詰められた
+    スナップショットも先頭に日付行を持つため、先頭同士の比較では
+    合致しないことがある（実際にこれで別トーク扱いになる不具合が出た）。
+    """
+    if not old:
+        return new
+    if not new:
+        return old
+    if old == new:
+        return old
+
+    # どちらかがもう一方を完全に含む
+    if len(new) >= len(old) and _find_block(new, old) >= 0:
+        return new          # new の方が前にも後ろにも広い
+    if len(old) >= len(new) and _find_block(old, new) >= 0:
+        return old          # new は取り込み済みの一部
+
+    k = OVERLAP_LINES
+    if len(old) < k or len(new) < k:
+        return None         # 短すぎて重なりを信頼できない
+
+    # old の末尾が new の途中にある = new は old の続き（先頭が欠けていてよい）
+    j = _find_block(new, old[-k:])
+    if j >= 0:
+        return old + new[j + k:]
+
+    # new の末尾が old の先頭に重なる = new はより前まで遡れている
+    j = _find_block(old, new[-k:])
+    if j >= 0:
+        overlap = j + k
+        if len(new) >= overlap and new[-overlap:] == old[:overlap]:
+            return new[:-overlap] + old
+
+    return None
+
+
 def _same_talk(a: list[str], b: list[str]) -> bool:
-    """本文の先頭アンカーが一致すれば同じトークとみなす。"""
+    """同じトークのスナップショット同士かを判定する。
+
+    先頭アンカーが一致するか、どちらかがもう一方の続き（重なりあり）なら同一。
+    """
     if not a or not b:
         return True
     n = min(len(a), len(b), ANCHOR_LINES)
-    return a[:n] == b[:n]
+    if a[:n] == b[:n]:
+        return True
+    return merge_bodies(a, b) is not None
 
 
 def resolve_dest(name: str, new_body: list[str]) -> tuple[Path, list[str] | None, bool]:
@@ -133,18 +205,32 @@ def ingest_file(path: Path, force: bool) -> tuple[str, int, int]:
         print(f"{rel}: 変化なし")
         return "unchanged", 0, 0
 
-    if len(new_body) < len(old_body):
-        if new_body == old_body[: len(new_body)]:
-            # 取り込み済み内容の先頭部分と完全一致 = 古いエクスポート。静かに無視
-            print(f"{rel}: 旧版（取り込み済み）")
-            return "unchanged", 0, 0
-        if not force:
-            warn(
-                f"{rel}: 新エクスポートが前回より短い "
-                f"({len(old_body)}行 → {len(new_body)}行)。データ消失を防ぐため置き換えを"
-                "スキップ。意図的なら --force を付けて再実行"
-            )
-            return "skipped", 0, 0
+    if old_body == new_body[: len(old_body)]:
+        pass  # 素直な追記（末尾に増えただけ）。下の共通処理で置き換える
+    else:
+        # 先頭が欠けたスナップショット同士でも履歴を落とさないよう結合を試みる
+        merged = merge_bodies(old_body, new_body)
+        if merged is not None:
+            if merged == old_body:
+                print(f"{rel}: 旧版（取り込み済み）")
+                return "unchanged", 0, 0
+            added = len(merged) - len(old_body)
+            added_msgs = count_messages(merged) - count_messages(old_body)
+            # ヘッダは既存の正本のものを優先（Mac 版は元々ヘッダを持たない）
+            old_header, _ = split_header(dest.read_text(encoding="utf-8-sig"))
+            new_header, _ = split_header(text)
+            _write(dest, (old_header or new_header) + "\n".join(merged) + "\n")
+            print(f"{rel}: 結合 ({added:+d}行)")
+            return "updated", added, added_msgs
+
+        if len(new_body) < len(old_body):
+            if not force:
+                warn(
+                    f"{rel}: 新エクスポートが前回より短く、重なりも見つからない "
+                    f"({len(old_body)}行 → {len(new_body)}行)。データ消失を防ぐため"
+                    "置き換えをスキップ。意図的なら --force を付けて再実行"
+                )
+                return "skipped", 0, 0
 
     if old_body != new_body[: len(old_body)]:
         warn(
@@ -171,11 +257,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="新エクスポートが前回より短くても置き換える")
     args = ap.parse_args(argv)
 
-    # 古い順に処理 → 同じトークに複数ファイルがあっても最新が最後に勝つ
-    paths = sorted(
-        (Path(p) for p in args.files),
-        key=lambda p: p.stat().st_mtime if p.is_file() else 0.0,
-    )
+    # 古い順に処理 → 同じトークに複数ファイル（日ごとのスナップショット）が
+    # あっても最新が最後に勝つ。ファイル名の日付を優先し、無ければ更新日時。
+    paths = sorted((Path(p) for p in args.files), key=snapshot_key)
 
     counts = {"updated": 0, "unchanged": 0, "skipped": 0, "errors": 0}
     added_lines = 0

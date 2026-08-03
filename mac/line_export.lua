@@ -77,6 +77,37 @@ local function setSaveLocation()
   hs.eventtap.keyStroke({}, "return"); hs.timer.usleep(700000)
 end
 
+-- ファイル名に書き出し日を付ける（[LINE]○○_20260803.txt）。
+-- LINE の既定名は毎回同じで、そのままだと前回分を上書きしてしまう。
+-- 書き出しは「画面に読み込まれている範囲」しか取れないため、後から
+-- 少ないファイルで上書きすると履歴を失う。日付を付けて日ごとに残す。
+local function stampFilename(app)
+  local axapp = hs.axuielement.applicationElement(app)
+  -- 保存シート内の名前欄を探す（メインウィンドウの検索欄と混同しないよう
+  -- シートの内側だけを見る）
+  local sheet = findAX(axapp, function(e)
+    local r = role(e); return r == "AXSheet" or r == "AXDialog"
+  end)
+  local field = sheet and findAX(sheet, function(e) return role(e) == "AXTextField" end)
+  if not field then return false end
+
+  local cur = tostring(field:attributeValue("AXValue") or "")
+  if cur == "" then return false end
+  local stem = cur:gsub("%.txt$", "")
+  if stem:match("_%d%d%d%d%d%d%d%d$") then return true end   -- 既に付いている
+  local stamped = stem .. "_" .. os.date("%Y%m%d") .. ".txt"
+
+  field:setAttributeValue("AXValue", stamped)
+  hs.timer.usleep(200000)
+  -- 反映されない実装のときはキー入力で置き換える（IME を避けるため最終手段）
+  if tostring(field:attributeValue("AXValue") or "") ~= stamped then
+    field:setAttributeValue("AXFocused", true); hs.timer.usleep(150000)
+    hs.eventtap.keyStroke({"cmd"}, "a"); hs.timer.usleep(100000)
+    hs.eventtap.keyStrokes(stamped); hs.timer.usleep(300000)
+  end
+  return true
+end
+
 -- 「保存」→（同名があれば）「置き換え」
 local function pressSaveButtons(app)
   local axapp = hs.axuielement.applicationElement(app)
@@ -102,6 +133,9 @@ local function exportOne(app, name, kind)
   clickAt(f.x + f.w + SAVE_DX, f.y + dy)                         -- トークを保存
   hs.timer.usleep(1300000)
   setSaveLocation()
+  if not stampFilename(app) then
+    log("warn: " .. name .. " のファイル名に日付を付けられず（既定名のまま保存）")
+  end
   return pressSaveButtons(app)
 end
 

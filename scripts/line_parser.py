@@ -219,18 +219,44 @@ def extract_chat_name(text: str, fallback: str = "unknown") -> str:
     return fallback
 
 
+# ファイル名末尾の書き出し日スタンプ「_20260803」。Mac 版の書き出しは
+# 既定名が毎回同じで上書きになってしまうため、日付を付けて日ごとの
+# スナップショットとして残す運用にしている。トーク名を取るときは剥がす。
+_DATE_STAMP = re.compile(r"[ _-]?(20\d{6})$")
+
+
+def snapshot_stamp(path: Path) -> str:
+    """ファイル名末尾の書き出し日（YYYYMMDD）。無ければ空文字。"""
+    m = _DATE_STAMP.search(path.stem)
+    return m.group(1) if m else ""
+
+
+def snapshot_key(path: Path) -> tuple[str, float]:
+    """新しいスナップショットほど大きくなる並び替えキー。
+
+    ファイル名の日付を最優先する。ファイルをコピー・移動したり
+    クラウド同期がかかると更新日時は当てにならないため。
+    """
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (snapshot_stamp(path), mtime)
+
+
 def fallback_name_from_filename(path: Path) -> str:
-    """ファイル名からトーク名の代替を作る（Drive の重複サフィックスも除去）。
+    """ファイル名からトーク名の代替を作る（重複・日付サフィックスも除去）。
 
     実際のエクスポートのファイル名は「[LINE] ○○とのトーク.txt」(1:1) /
     「[LINE] ○○のトーク.txt」(グループ)で、ヘッダ行と違い「履歴」は付かない。
-    Mac 版アプリは「[LINE]○○.txt」「[LINE] Chat with ○○.txt」の2系統。
-    どの形式でも剥がせるようにしておく。
+    Mac 版アプリは「[LINE]○○.txt」「[LINE] Chat with ○○.txt」の2系統で、
+    さらに書き出し日を付けた「[LINE]○○_20260803.txt」を扱う。
     """
     name = re.sub(r"^\[LINE\]\s*", "", path.stem)
     name = re.sub(r"^Chat with\s+", "", name, flags=re.IGNORECASE)  # Mac 版英語表示
-    name = re.sub(r"\s*\(\d+\)$", "", name)  # 「... (1)」など Drive の重複保存
-    name = re.sub(r"\s+\d+$", "", name)      # 「... 2」など macOS の重複保存
+    name = re.sub(r"\s*\(\d+\)$", "", name)   # 「... (1)」など Drive の重複保存
+    name = re.sub(r"\s+\d{1,2}$", "", name)   # 「... 2」など macOS の重複保存
+    name = _DATE_STAMP.sub("", name)          # 「..._20260803」書き出し日スタンプ
     name = re.sub(r"(?:との|の)?トーク(?:履歴)?$", "", name).strip()
     return name or path.stem
 
