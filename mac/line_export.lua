@@ -20,9 +20,31 @@ local OUT_DIR = os.getenv("HOME") ..
 -- 書き出す対象: {検索名, メニュー型}
 --   full     = 1:1 / グループ（「トークを保存」は8番目）
 --   official = 公式アカウント（4番目）
+--
+-- 検索欄に入れて先頭候補を開くので、名前は一意に絞れる範囲で短くてよい
+-- （絵文字や全角スペースは入力が不安定なので、その手前まででよい）。
+--
+-- ★ 型は迷ったら "full" にすること。公式アカウントを full で開いた場合、
+--    クリックはメニューの外に落ちて何も起きず、ログに NG が出るだけ。
+--    逆に通常のトークを official 指定にすると、短いメニューの4番目＝
+--    別の項目（退出・削除など）を押してしまう危険がある。
+--    NG が出たトークだけ official に変えるのが安全な進め方。
+--
+-- 一覧を作り直したいときは ⌘⌥⌃J（この形式でコンソールに出力される）。
 local TARGETS = {
-  -- { "グループA", "full" },
-  -- { "公式アカB", "official" },
+  { "オーチュー/小林央忠", "full" },
+  { "3日後 ハートランド",  "full" },
+  { "かにっこにー",        "full" },
+  { "山脇開生",            "full" },
+  { "Berry",               "full" },
+  { "パプリカ",            "full" },
+  { "p Koyo",              "full" },
+  { "H Village",           "full" },
+  { "np 雄太",             "full" },
+  { "il 石川ありがとう",   "full" },
+  { "いりべひでなり",      "full" },
+  { "村田研",              "full" },
+  { "mP-廣瀬舞",           "full" },
 }
 
 local RUN_AT = "07:00"
@@ -108,6 +130,15 @@ local function stampFilename(app)
   return true
 end
 
+-- 保存シートが実際に開いたか。開いていないのに次の操作へ進むと、
+-- 想定外の画面をキー入力で叩いてしまうので、必ずここで確認する。
+local function saveSheetOpen(app)
+  local axapp = hs.axuielement.applicationElement(app)
+  return findAX(axapp, function(e)
+    local r = role(e); return r == "AXSheet" or r == "AXDialog"
+  end) ~= nil
+end
+
 -- 「保存」→（同名があれば）「置き換え」
 local function pressSaveButtons(app)
   local axapp = hs.axuielement.applicationElement(app)
@@ -132,6 +163,17 @@ local function exportOne(app, name, kind)
   local dy = (kind == "official") and SAVE_DY_OFFICIAL or SAVE_DY_FULL
   clickAt(f.x + f.w + SAVE_DX, f.y + dy)                         -- トークを保存
   hs.timer.usleep(1300000)
+
+  -- 保存シートが出ていなければ、型違いか座標ズレ。ここで打ち切る。
+  -- 別の y を当てずっぽうで押すと、短いメニューでは退出・削除などの
+  -- 項目に当たりうるので、自動での再試行はしない。
+  if not saveSheetOpen(app) then
+    hs.eventtap.keyStroke({}, "escape"); hs.timer.usleep(400000)
+    local other = (kind == "official") and "full" or "official"
+    return false, "保存ダイアログが出ない（型が \"" .. other ..
+                  "\" か、座標ズレ。⌘⌥⌃K で測り直す）"
+  end
+
   setSaveLocation()
   if not stampFilename(app) then
     log("warn: " .. name .. " のファイル名に日付を付けられず（既定名のまま保存）")
@@ -191,5 +233,39 @@ hs.hotkey.bind({"cmd","alt","ctrl"}, "K", function()          -- 座標測定
   end
 end)
 
-log("読込完了 / 毎日" .. RUN_AT .. " 自動実行 / 手動 ⌘⌥⌃L / 座標測定 ⌘⌥⌃K")
+hs.hotkey.bind({"cmd","alt","ctrl"}, "J", function()          -- トーク名を一括取得
+  local app = hs.application.find(LINE_BUNDLE)
+  if not app then hs.alert.show("LINEが見つからない", 3); return end
+  app:activate(true); hs.timer.usleep(400000)
+  local win = app:focusedWindow() or app:mainWindow()
+  if not win then hs.alert.show("LINEウィンドウ無し", 3); return end
+
+  -- トークリストの行は AX で取れる（⋮ と違ってツリーに乗っている）。
+  -- ただし表示中の行しか取れないので、全部欲しければリストをスクロールしてから押す。
+  local names, seen = {}, {}
+  local function walk(el, depth)
+    if not el or depth > 30 then return end
+    if role(el) == "AXCell" then
+      local t = findAX(el, function(e)
+        return role(e) == "AXStaticText"
+           and tostring(e:attributeValue("AXValue") or "") ~= ""
+      end)
+      if t then
+        local v = tostring(t:attributeValue("AXValue"))
+        if not seen[v] then seen[v] = true; names[#names + 1] = v end
+      end
+    end
+    for _, c in ipairs(el:attributeValue("AXChildren") or {}) do walk(c, depth + 1) end
+  end
+  walk(hs.axuielement.windowElement(win), 0)
+
+  print("=== LINE トーク一覧 " .. #names .. "件（TARGETS にそのまま貼れる形式）===")
+  for _, n in ipairs(names) do
+    print(string.format('  { "%s", "full" },', n))
+  end
+  print("=== ここまで。表示中の行のみ。足りなければリストをスクロールして再度 ⌘⌥⌃J ===")
+  hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
+end)
+
+log("読込完了 / 毎日" .. RUN_AT .. " 自動実行 / 手動 ⌘⌥⌃L / 一覧 ⌘⌥⌃J / 座標測定 ⌘⌥⌃K")
 return M

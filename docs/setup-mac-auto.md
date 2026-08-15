@@ -31,18 +31,22 @@ push するようにする。**設定後はこちらの操作はゼロ**。
 git clone https://github.com/denkingon/line-dump.git ~/Document/line-dump
 ```
 
-### 2. 書き出すトークを指定
+### 2. 書き出すトークを確認（設定済み）
 
-`~/Document/line-dump/mac/line_export.lua` を開き、`TARGETS` に対象を書く。
-型は 1:1・グループなら `full`、公式アカウントなら `official`。
+`~/Document/line-dump/mac/line_export.lua` の `TARGETS` に対象が入っている。
+増やしたいときは同じ形式で足す。
 
-```lua
-local TARGETS = {
-  { "家族",       "full" },
-  { "ゼミ",       "full" },
-  { "○○公式",    "official" },
-}
-```
+**トーク名を一括で取りたいとき**は、Hammerspoon 読み込み後に `⌘⌥⌃J`。
+表示中のトーク名が `TARGETS` の形式でコンソールに出力されるので、そのまま
+貼れる（トークリストの行は AX で読めるため。⋮ と違ってツリーに乗っている）。
+表示中の行しか取れないので、全部欲しければリストをスクロールしてから押す。
+
+**型は迷ったら `full` のままにすること。** メニューは2種類あり、
+1:1・グループは「トークを保存」が8番目、公式アカウントは4番目にある。
+公式アカウントを `full` で開いた場合、クリックはメニューの外に落ちて
+何も起きず、ログに NG が出るだけで済む。逆に通常のトークを `official`
+にすると、短いメニューの4番目＝別の項目（退出・削除など）を押しかねない。
+**NG が出たトークだけ `official` に変える**のが安全な進め方。
 
 保存先（`OUT_DIR`）は既定で既存の Dropbox アーカイブ
 `~/Library/CloudStorage/Dropbox-SFC-CNS/Ryo Murata/Backups/Linetxt` を指している。
