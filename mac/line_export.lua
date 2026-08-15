@@ -9,6 +9,7 @@
 --   ズレたら ⌘⌥⇧K で測り直して CALIBRATION を書き換える。
 --
 --   手動実行: ⌘⌥⌃L / 座標測定: ⌘⌥⌃K（⇧ でも可）
+--   1件だけ試す: コンソールで __LINE_EXPORT.one("トーク名")
 -- =====================================================================
 local M = {}
 
@@ -181,40 +182,72 @@ local function exportOne(app, name, kind)
   return pressSaveButtons(app)
 end
 
+-- LINE を前面に出し、ウィンドウを画面いっぱいにして座標の基準をそろえる
+local function prepareApp()
+  local app = hs.application.find(LINE_BUNDLE)
+  if not app then
+    hs.application.open(LINE_BUNDLE); hs.timer.usleep(4000000)
+    app = hs.application.find(LINE_BUNDLE)
+  end
+  if not app then return nil, "LINEを起動できない" end
+  app:activate(true); hs.timer.usleep(1000000)
+  local win = app:focusedWindow() or app:mainWindow()
+  if not win then return nil, "LINEウィンドウ無し（最小化?）" end
+  win:setFrame(hs.screen.primaryScreen():frame())
+  hs.timer.usleep(800000)
+  return app
+end
+
+-- 書き出した txt を取り込んで push する。第2引数の true は「ログインシェルの
+-- 環境を使う」指定。これが無いと PATH が最小限になり、git や python が
+-- 見つからないことがある。
+local function runSync()
+  local out = hs.execute('/bin/bash "' .. REPO .. '/mac/sync.sh" 2>&1', true)
+  log("sync:\n" .. (out or ""))
+  return (out or ""):match("push 完了") and "push済" or "push無し"
+end
+
+-- 1件だけ試す。Hammerspoon コンソールから:
+--   __LINE_EXPORT.one("Berry")
+--   __LINE_EXPORT.one("H Village", "official")
+function M.one(name, kind)
+  local app, err = prepareApp()
+  if not app then log(err); hs.alert.show(err, 4); return false end
+  local ok, e = exportOne(app, name, kind or "full")
+  if not ok then
+    log("NG  " .. name .. "  (" .. tostring(e) .. ")")
+    hs.eventtap.keyStroke({}, "escape")
+    hs.alert.show("NG: " .. name .. "\n" .. tostring(e), 6)
+    return false
+  end
+  log("OK  " .. name)
+  local pushed = runSync()
+  hs.alert.show("書き出しOK: " .. name .. " / " .. pushed, 4)
+  return true
+end
+
 local function runExport()
   if #TARGETS == 0 then
     hs.alert.show("TARGETS が空です。line_export.lua を編集してください", 4)
     log("TARGETS が空"); return
   end
 
-  local app = hs.application.find(LINE_BUNDLE)
-  if not app then
-    hs.application.open(LINE_BUNDLE); hs.timer.usleep(4000000)
-    app = hs.application.find(LINE_BUNDLE)
-  end
-  if not app then log("LINEを起動できない"); return end
-  app:activate(true); hs.timer.usleep(1000000)
-  local win = app:focusedWindow() or app:mainWindow()
-  if not win then log("LINEウィンドウ無し（最小化?）"); return end
-  win:setFrame(hs.screen.primaryScreen():frame())   -- 座標の基準をそろえる
-  hs.timer.usleep(800000)
+  local app, err = prepareApp()
+  if not app then log(err); return end
 
   local okN, ngN = 0, 0
   for _, t in ipairs(TARGETS) do
-    local ok, err = exportOne(app, t[1], t[2])
+    local ok, e = exportOne(app, t[1], t[2])
     if ok then
       okN = okN + 1; log("OK  " .. t[1])
     else
-      ngN = ngN + 1; log("NG  " .. t[1] .. "  (" .. tostring(err) .. ")")
+      ngN = ngN + 1; log("NG  " .. t[1] .. "  (" .. tostring(e) .. ")")
       hs.eventtap.keyStroke({}, "escape"); hs.timer.usleep(300000)
     end
     hs.timer.usleep(800000)
   end
 
-  -- 書き出した txt をリポジトリに取り込んで push
-  local out = hs.execute('/bin/bash "' .. REPO .. '/mac/sync.sh" 2>&1')
-  log("sync:\n" .. (out or ""))
-  local pushed = (out or ""):match("push 完了") and "push済" or "push無し"
+  local pushed = runSync()
   hs.alert.show(string.format("LINE書き出し OK:%d NG:%d / %s", okN, ngN, pushed), 4)
 end
 
