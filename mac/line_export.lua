@@ -6,9 +6,9 @@
 --
 --   AX で押せる所は AX、⋮と「トークを保存」だけ座標。
 --   座標はウィンドウ右上角からの相対（2026-07-28 実機較正）。
---   ズレたら ⌘⌥⌃K で測り直して CALIBRATION を書き換える。
+--   ズレたら ⌘⌥⇧K で測り直して CALIBRATION を書き換える。
 --
---   手動実行: ⌘⌥⌃L / 座標測定: ⌘⌥⌃K
+--   手動実行: ⌘⌥⇧L / 座標測定: ⌘⌥⇧K
 -- =====================================================================
 local M = {}
 
@@ -30,7 +30,7 @@ local OUT_DIR = os.getenv("HOME") ..
 --    別の項目（退出・削除など）を押してしまう危険がある。
 --    NG が出たトークだけ official に変えるのが安全な進め方。
 --
--- 一覧を作り直したいときは ⌘⌥⌃J（この形式でコンソールに出力される）。
+-- 一覧を作り直したいときは ⌘⌥⇧J（この形式でコンソールに出力される）。
 local TARGETS = {
   { "オーチュー/小林央忠", "full" },
   { "3日後 ハートランド",  "full" },
@@ -47,7 +47,7 @@ local TARGETS = {
   { "mP-廣瀬舞",           "full" },
 }
 
-local RUN_AT = "07:00"
+local RUN_AT = "07:30"
 
 -- ▼ 較正値（ウィンドウ右上角からの論理座標オフセット）
 local MENU_DX, MENU_DY = -24, 80    -- 「⋮」
@@ -58,7 +58,7 @@ local SAVE_DY_OFFICIAL = 207        -- official 型の y
 
 -- ===================== 実装 ==========================================
 local LINE_BUNDLE = "jp.naver.line.mac"
-local function log(s) print(os.date("%H:%M:%S ") .. "[LINE-export] " .. s) end
+local function log(s) print(os.date("%H:%M:%S ") .. "[line-dump] " .. s) end
 local function clickAt(x, y)
   hs.eventtap.leftClick(hs.geometry.point(x, y)); hs.timer.usleep(300000)
 end
@@ -171,7 +171,7 @@ local function exportOne(app, name, kind)
     hs.eventtap.keyStroke({}, "escape"); hs.timer.usleep(400000)
     local other = (kind == "official") and "full" or "official"
     return false, "保存ダイアログが出ない（型が \"" .. other ..
-                  "\" か、座標ズレ。⌘⌥⌃K で測り直す）"
+                  "\" か、座標ズレ。⌘⌥⇧K で測り直す）"
   end
 
   setSaveLocation()
@@ -231,9 +231,9 @@ M.hotkeys = {}
 
 M.timer = hs.timer.doAt(RUN_AT, "1d", runExport)              -- 毎日
 M.hotkeys[#M.hotkeys + 1] =
-  hs.hotkey.bind({"cmd","alt","ctrl"}, "L", runExport)        -- 手動実行
+  hs.hotkey.bind({"cmd","alt","shift"}, "L", runExport)        -- 手動実行
 M.hotkeys[#M.hotkeys + 1] =
-  hs.hotkey.bind({"cmd","alt","ctrl"}, "K", function()        -- 座標測定
+  hs.hotkey.bind({"cmd","alt","shift"}, "K", function()        -- 座標測定
   local p = hs.mouse.absolutePosition()
   local app = hs.application.find(LINE_BUNDLE)
   local w = app and (app:focusedWindow() or app:mainWindow())
@@ -247,7 +247,7 @@ M.hotkeys[#M.hotkeys + 1] =
 end)
 
 M.hotkeys[#M.hotkeys + 1] =
-  hs.hotkey.bind({"cmd","alt","ctrl"}, "J", function()        -- トーク名を一括取得
+  hs.hotkey.bind({"cmd","alt","shift"}, "J", function()        -- トーク名を一括取得
   local app = hs.application.find(LINE_BUNDLE)
   if not app then hs.alert.show("LINEが見つからない", 3); return end
   app:activate(true); hs.timer.usleep(400000)
@@ -277,13 +277,13 @@ M.hotkeys[#M.hotkeys + 1] =
   for _, n in ipairs(names) do
     print(string.format('  { "%s", "full" },', n))
   end
-  print("=== ここまで。表示中の行のみ。足りなければリストをスクロールして再度 ⌘⌥⌃J ===")
+  print("=== ここまで。表示中の行のみ。足りなければリストをスクロールして再度 ⌘⌥⇧J ===")
   hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
 end)
 
 _G.__LINE_EXPORT = M
 
 log(string.format(
-  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⌃L / 一覧 ⌘⌥⌃J / 座標測定 ⌘⌥⌃K",
+  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⇧L / 一覧 ⌘⌥⇧J / 座標測定 ⌘⌥⇧K",
   #TARGETS, RUN_AT))
 return M
