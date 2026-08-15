@@ -51,10 +51,22 @@ local TARGETS = {
 local RUN_AT = "07:00"
 
 -- ▼ 較正値（ウィンドウ右上角からの論理座標オフセット）
-local MENU_DX, MENU_DY = -24, 80    -- 「⋮」
-local SAVE_DX          = -70        -- 「トークを保存」x
-local SAVE_DY_FULL     = 326        -- full 型の y
-local SAVE_DY_OFFICIAL = 207        -- official 型の y
+--   既定値は 2026-07-28 に MacBook Air M1（1680×1050・最大化）での実測。
+--   環境が違うとズレる。⌘⌥⌃M の較正ウィザード（マウスを乗せて待つだけ）で
+--   測り直すと mac/calibration.lua（このMac専用・git管理外）に保存され、
+--   以後そちらが優先される。
+local C = {
+  MENU_DX = -24,  MENU_DY = 80,     -- 「⋮」
+  SAVE_DX = -70,                    -- 「トークを保存」x
+  SAVE_DY_FULL = 326,               -- full 型の y
+  SAVE_DY_OFFICIAL = 207,           -- official 型の y
+}
+do
+  local ok, saved = pcall(dofile, REPO .. "/mac/calibration.lua")
+  if ok and type(saved) == "table" then
+    for k, v in pairs(saved) do C[k] = v end
+  end
+end
 -- ▲
 
 -- ===================== 実装 ==========================================
@@ -79,7 +91,15 @@ local function title(el) return tostring(el:attributeValue("AXTitle") or "") end
 -- 検索欄に名前を入れて先頭候補を開く（リストは並び替わるので毎回検索する）
 local function openChat(app, name)
   local win = app:focusedWindow() or app:mainWindow()
-  if not win then return false, "no window" end
+  if not win then
+    -- LINE は Escape でメインウィンドウを閉じる。閉じていたら Dock クリック
+    -- 相当の reopen で開き直す（実測: 全13件が "no window" 連鎖した事故の対策）
+    hs.application.open(LINE_BUNDLE); hs.timer.usleep(2000000)
+    app:activate(true); hs.timer.usleep(800000)
+    win = app:focusedWindow() or app:mainWindow()
+    if not win then return false, "no window" end
+    win:setFrame(hs.screen.primaryScreen():frame()); hs.timer.usleep(500000)
+  end
   local axwin = hs.axuielement.windowElement(win)
   local field = findAX(axwin, function(e) return role(e) == "AXTextField" end)
   if not field then return false, "search field not found" end
@@ -159,10 +179,10 @@ local function exportOne(app, name, kind)
   local ok, err = openChat(app, name)
   if not ok then return false, err end
   local f = (app:focusedWindow() or app:mainWindow()):frame()
-  clickAt(f.x + f.w + MENU_DX, f.y + MENU_DY)                    -- ⋮
+  clickAt(f.x + f.w + C.MENU_DX, f.y + C.MENU_DY)                -- ⋮
   hs.timer.usleep(700000)
-  local dy = (kind == "official") and SAVE_DY_OFFICIAL or SAVE_DY_FULL
-  clickAt(f.x + f.w + SAVE_DX, f.y + dy)                         -- トークを保存
+  local dy = (kind == "official") and C.SAVE_DY_OFFICIAL or C.SAVE_DY_FULL
+  clickAt(f.x + f.w + C.SAVE_DX, f.y + dy)                       -- トークを保存
   hs.timer.usleep(1300000)
 
   -- 保存シートが出ていなければ、型違いか座標ズレ。ここで打ち切る。
@@ -216,7 +236,6 @@ function M.one(name, kind)
   local ok, e = exportOne(app, name, kind or "full")
   if not ok then
     log("NG  " .. name .. "  (" .. tostring(e) .. ")")
-    hs.eventtap.keyStroke({}, "escape")
     hs.alert.show("NG: " .. name .. "\n" .. tostring(e), 6)
     return false
   end
@@ -242,7 +261,6 @@ local function runExport()
       okN = okN + 1; log("OK  " .. t[1])
     else
       ngN = ngN + 1; log("NG  " .. t[1] .. "  (" .. tostring(e) .. ")")
-      hs.eventtap.keyStroke({}, "escape"); hs.timer.usleep(300000)
     end
     hs.timer.usleep(800000)
   end
@@ -320,9 +338,43 @@ bindBoth("J", function()                                      -- トーク名を
   hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
 end)
 
+-- 較正ウィザード: マウスを乗せて待つだけで ⋮ と「トークを保存」の位置を保存する
+bindBoth("M", function()
+  local app = hs.application.find(LINE_BUNDLE)
+  local win = app and (app:focusedWindow() or app:mainWindow())
+  if not win then hs.alert.show("先にLINEのウィンドウを開いてください", 4); return end
+  app:activate(true)
+  win:setFrame(hs.screen.primaryScreen():frame())
+  local f = win:frame()
+  hs.alert.show("較正 1/2: 「⋮」ボタンの上にマウスを置いて、そのまま5秒待つ", 5)
+  hs.timer.doAfter(6, function()
+    local p1 = hs.mouse.absolutePosition()
+    C.MENU_DX = math.floor(p1.x - (f.x + f.w))
+    C.MENU_DY = math.floor(p1.y - f.y)
+    hs.alert.show("較正 2/2: 「⋮」を自分でクリックしてメニューを開き、\n「トークを保存」の上にマウスを置いて7秒待つ", 7)
+    hs.timer.doAfter(8, function()
+      local p2 = hs.mouse.absolutePosition()
+      C.SAVE_DX = math.floor(p2.x - (f.x + f.w))
+      C.SAVE_DY_FULL = math.floor(p2.y - f.y)
+      C.SAVE_DY_OFFICIAL = C.SAVE_DY_FULL - 119   -- 実測差(326-207)を平行移動
+      local fh = io.open(REPO .. "/mac/calibration.lua", "w")
+      if fh then
+        fh:write(string.format(
+          "-- このMac用の較正値（⌘⌥⌃M で再生成・git管理外）\nreturn { MENU_DX=%d, MENU_DY=%d, SAVE_DX=%d, SAVE_DY_FULL=%d, SAVE_DY_OFFICIAL=%d }\n",
+          C.MENU_DX, C.MENU_DY, C.SAVE_DX, C.SAVE_DY_FULL, C.SAVE_DY_OFFICIAL))
+        fh:close()
+      end
+      log(string.format("較正保存: ⋮=(%d,%d) トークを保存=(%d,%d)",
+        C.MENU_DX, C.MENU_DY, C.SAVE_DX, C.SAVE_DY_FULL))
+      hs.eventtap.keyStroke({}, "escape")   -- 開いたメニューを閉じる
+      hs.alert.show("較正を保存しました。⌘⌥⌃L で実行できます", 4)
+    end)
+  end)
+end)
+
 _G.__LINE_EXPORT = M
 
 log(string.format(
-  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⌃L(⇧も可) / 一覧 ⌘⌥⌃J / 座標測定 ⌘⌥⌃K",
+  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⌃L(⇧も可) / 較正 ⌘⌥⌃M / 一覧 ⌘⌥⌃J",
   #TARGETS, RUN_AT))
 return M

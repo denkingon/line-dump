@@ -4,3 +4,6 @@ __pycache__/
 
 # Mac 側同期スクリプトのログ（リポジトリ内に置くが履歴には残さない）
 mac/sync.log
+
+# Mac ごとの座標較正値（⌘⌥⌃M で生成・環境依存なので共有しない）
+mac/calibration.lua
