@@ -218,9 +218,22 @@ local function runExport()
   hs.alert.show(string.format("LINE書き出し OK:%d NG:%d / %s", okN, ngN, pushed), 4)
 end
 
+-- 二重読み込み対策。init.lua に dofile 行が複数入っていたり、Reload を
+-- 繰り返したりしても、タイマーとホットキーが多重にならないようにする。
+-- （多重になると 07:00 に自動操作が同時に2本走り、LINE の画面を奪い合う）
+if _G.__LINE_EXPORT then
+  local prev = _G.__LINE_EXPORT
+  if prev.timer then prev.timer:stop() end
+  for _, hk in ipairs(prev.hotkeys or {}) do hk:delete() end
+  log("前回の読み込み分を解除して張り直します")
+end
+M.hotkeys = {}
+
 M.timer = hs.timer.doAt(RUN_AT, "1d", runExport)              -- 毎日
-hs.hotkey.bind({"cmd","alt","ctrl"}, "L", runExport)          -- 手動実行
-hs.hotkey.bind({"cmd","alt","ctrl"}, "K", function()          -- 座標測定
+M.hotkeys[#M.hotkeys + 1] =
+  hs.hotkey.bind({"cmd","alt","ctrl"}, "L", runExport)        -- 手動実行
+M.hotkeys[#M.hotkeys + 1] =
+  hs.hotkey.bind({"cmd","alt","ctrl"}, "K", function()        -- 座標測定
   local p = hs.mouse.absolutePosition()
   local app = hs.application.find(LINE_BUNDLE)
   local w = app and (app:focusedWindow() or app:mainWindow())
@@ -233,7 +246,8 @@ hs.hotkey.bind({"cmd","alt","ctrl"}, "K", function()          -- 座標測定
   end
 end)
 
-hs.hotkey.bind({"cmd","alt","ctrl"}, "J", function()          -- トーク名を一括取得
+M.hotkeys[#M.hotkeys + 1] =
+  hs.hotkey.bind({"cmd","alt","ctrl"}, "J", function()        -- トーク名を一括取得
   local app = hs.application.find(LINE_BUNDLE)
   if not app then hs.alert.show("LINEが見つからない", 3); return end
   app:activate(true); hs.timer.usleep(400000)
@@ -267,5 +281,9 @@ hs.hotkey.bind({"cmd","alt","ctrl"}, "J", function()          -- トーク名を
   hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
 end)
 
-log("読込完了 / 毎日" .. RUN_AT .. " 自動実行 / 手動 ⌘⌥⌃L / 一覧 ⌘⌥⌃J / 座標測定 ⌘⌥⌃K")
+_G.__LINE_EXPORT = M
+
+log(string.format(
+  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⌃L / 一覧 ⌘⌥⌃J / 座標測定 ⌘⌥⌃K",
+  #TARGETS, RUN_AT))
 return M
