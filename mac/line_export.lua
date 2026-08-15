@@ -8,7 +8,7 @@
 --   座標はウィンドウ右上角からの相対（2026-07-28 実機較正）。
 --   ズレたら ⌘⌥⇧K で測り直して CALIBRATION を書き換える。
 --
---   手動実行: ⌘⌥⇧L / 座標測定: ⌘⌥⇧K
+--   手動実行: ⌘⌥⌃L / 座標測定: ⌘⌥⌃K（⇧ でも可）
 -- =====================================================================
 local M = {}
 
@@ -47,7 +47,7 @@ local TARGETS = {
   { "mP-廣瀬舞",           "full" },
 }
 
-local RUN_AT = "07:30"
+local RUN_AT = "07:00"
 
 -- ▼ 較正値（ウィンドウ右上角からの論理座標オフセット）
 local MENU_DX, MENU_DY = -24, 80    -- 「⋮」
@@ -229,11 +229,18 @@ if _G.__LINE_EXPORT then
 end
 M.hotkeys = {}
 
+-- Ctrl版・Shift版の両方に割り当てる。以前ここは ⌘⌥⌃ を使う別スクリプトと
+-- 競合していたため一度 Shift に逃がしたが、そちらを無効化した後も
+-- 手が Ctrl を覚えているはずなので、どちらを押しても動くようにしておく。
+local function bindBoth(key, fn)
+  for _, mods in ipairs({{"cmd","alt","ctrl"}, {"cmd","alt","shift"}}) do
+    M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(mods, key, fn)
+  end
+end
+
 M.timer = hs.timer.doAt(RUN_AT, "1d", runExport)              -- 毎日
-M.hotkeys[#M.hotkeys + 1] =
-  hs.hotkey.bind({"cmd","alt","shift"}, "L", runExport)        -- 手動実行
-M.hotkeys[#M.hotkeys + 1] =
-  hs.hotkey.bind({"cmd","alt","shift"}, "K", function()        -- 座標測定
+bindBoth("L", runExport)                                      -- 手動実行
+bindBoth("K", function()                                      -- 座標測定
   local p = hs.mouse.absolutePosition()
   local app = hs.application.find(LINE_BUNDLE)
   local w = app and (app:focusedWindow() or app:mainWindow())
@@ -246,8 +253,7 @@ M.hotkeys[#M.hotkeys + 1] =
   end
 end)
 
-M.hotkeys[#M.hotkeys + 1] =
-  hs.hotkey.bind({"cmd","alt","shift"}, "J", function()        -- トーク名を一括取得
+bindBoth("J", function()                                      -- トーク名を一括取得
   local app = hs.application.find(LINE_BUNDLE)
   if not app then hs.alert.show("LINEが見つからない", 3); return end
   app:activate(true); hs.timer.usleep(400000)
@@ -284,6 +290,6 @@ end)
 _G.__LINE_EXPORT = M
 
 log(string.format(
-  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⇧L / 一覧 ⌘⌥⇧J / 座標測定 ⌘⌥⇧K",
+  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⌃L(⇧も可) / 一覧 ⌘⌥⌃J / 座標測定 ⌘⌥⌃K",
   #TARGETS, RUN_AT))
 return M
