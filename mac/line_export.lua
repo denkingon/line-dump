@@ -255,14 +255,29 @@ local function runExport()
   if not app then log(err); return end
 
   local okN, ngN = 0, 0
+  local ngLines = {}
   for _, t in ipairs(TARGETS) do
     local ok, e = exportOne(app, t[1], t[2])
     if ok then
       okN = okN + 1; log("OK  " .. t[1])
     else
       ngN = ngN + 1; log("NG  " .. t[1] .. "  (" .. tostring(e) .. ")")
+      ngLines[#ngLines + 1] = t[1] .. ": " .. tostring(e)
     end
     hs.timer.usleep(800000)
+  end
+
+  -- 結果をリポジトリに残す。ログはこのMacにしか無く、失敗の理由を
+  -- 毎回コンソールから貼ってもらうのは現実的でないため、push して共有する。
+  local hb = io.open(REPO .. "/mac/heartbeat.txt", "w")
+  if hb then
+    hb:write(string.format("last_run: %s\nok: %d\nng: %d\n",
+      os.date("%Y-%m-%d %H:%M:%S"), okN, ngN))
+    if #ngLines > 0 then
+      hb:write("failures:\n")
+      for _, line in ipairs(ngLines) do hb:write("  - " .. line .. "\n") end
+    end
+    hb:close()
   end
 
   local pushed = runSync()
@@ -275,6 +290,7 @@ end
 if _G.__LINE_EXPORT then
   local prev = _G.__LINE_EXPORT
   if prev.timer then prev.timer:stop() end
+  if prev.waker then prev.waker:stop() end
   for _, hk in ipairs(prev.hotkeys or {}) do hk:delete() end
   log("前回の読み込み分を解除して張り直します")
 end
@@ -289,7 +305,59 @@ local function bindBoth(key, fn)
   end
 end
 
-M.timer = hs.timer.doAt(RUN_AT, "1d", runExport)              -- 毎日
+-- 毎日1回を「取りこぼさない」ための追いかけ実行。
+--
+-- 固定時刻の hs.timer.doAt は Mac がスリープしていると発火せず、起きた後も
+-- 追いかけない。実測でも 27日間で 07:00 に走ったのは1度だけだった。
+-- そこで一定間隔で「今日はもう走ったか」を確認し、条件が整った最初の
+-- タイミングで実行する。スリープから復帰した直後も確認する。
+local STATE_PATH = REPO .. "/mac/.last_run"   -- 最後に走った日 (YYYYMMDD)
+local CHECK_EVERY   = 600   -- 10分ごとに条件を確認
+local IDLE_REQUIRED = 180   -- 3分以上操作が無ければ「離席中」とみなす
+
+local function lastRunDay()
+  local f = io.open(STATE_PATH, "r")
+  if not f then return "" end
+  local d = (f:read("l") or ""):gsub("%s", "")
+  f:close()
+  return d
+end
+
+local function screenLocked()
+  local props = hs.caffeinate.sessionProperties
+  return props and props.CGSSessionScreenIsLocked or false
+end
+
+local function maybeRun()
+  local today = os.date("%Y%m%d")
+  if lastRunDay() == today then return end
+
+  local hh, mm = RUN_AT:match("^(%d+):(%d+)$")
+  local now = os.date("*t")
+  if now.hour * 60 + now.min < tonumber(hh) * 60 + tonumber(mm) then return end
+
+  -- ロック中・スクリーンセーバ中はクリックが通らない
+  if screenLocked() then return end
+  -- 操作中に割り込むと、クリックを奪い合って失敗する上に邪魔になる
+  if hs.host.idleTime() < IDLE_REQUIRED then return end
+
+  -- 実行中の再入と、失敗時の一日中のリトライを防ぐため先に記録する
+  local f = io.open(STATE_PATH, "w")
+  if f then f:write(today .. "\n"); f:close() end
+  log("自動実行を開始（" .. os.date("%H:%M") .. "）")
+  runExport()
+end
+
+M.timer = hs.timer.doEvery(CHECK_EVERY, maybeRun)
+M.waker = hs.caffeinate.watcher.new(function(ev)
+  local w = hs.caffeinate.watcher
+  if ev == w.systemDidWake or ev == w.screensDidUnlock
+     or ev == w.sessionDidBecomeActive then
+    hs.timer.doAfter(120, maybeRun)   -- 復帰直後は落ち着くまで少し待つ
+  end
+end)
+M.waker:start()
+
 bindBoth("L", runExport)                                      -- 手動実行
 bindBoth("K", function()                                      -- 座標測定
   local p = hs.mouse.absolutePosition()
@@ -375,6 +443,6 @@ end)
 _G.__LINE_EXPORT = M
 
 log(string.format(
-  "読込完了 / 対象%d件 / 毎日%s 自動実行 / 手動 ⌘⌥⌃L(⇧も可) / 較正 ⌘⌥⌃M / 一覧 ⌘⌥⌃J",
+  "読込完了 / 対象%d件 / %s以降 離席中に自動実行 / 手動 ⌘⌥⌃L(⇧も可) / 較正 ⌘⌥⌃M / 一覧 ⌘⌥⌃J",
   #TARGETS, RUN_AT))
 return M
