@@ -91,10 +91,11 @@ local function title(el) return tostring(el:attributeValue("AXTitle") or "") end
 -- 検索欄に名前を入れて先頭候補を開く（リストは並び替わるので毎回検索する）
 local function openChat(app, name)
   local win = app:focusedWindow() or app:mainWindow()
+  if win and not win:isVisible() then win = nil end
   if not win then
     -- LINE は Escape でメインウィンドウを閉じる。閉じていたら Dock クリック
     -- 相当の reopen で開き直す（実測: 全13件が "no window" 連鎖した事故の対策）
-    hs.application.open(LINE_BUNDLE); hs.timer.usleep(2000000)
+    hs.execute("open -b " .. LINE_BUNDLE); hs.timer.usleep(2000000)
     app:activate(true); hs.timer.usleep(800000)
     win = app:focusedWindow() or app:mainWindow()
     if not win then return false, "no window" end
@@ -211,6 +212,12 @@ local function prepareApp()
   if not app then return nil, "LINEを起動できない" end
   app:activate(true); hs.timer.usleep(1000000)
   local win = app:focusedWindow() or app:mainWindow()
+  if not win or not win:isVisible() then
+    -- 窓が閉じていたら Dock クリック相当の reopen（open -b）で開き直す
+    hs.execute("open -b " .. LINE_BUNDLE); hs.timer.usleep(2000000)
+    app:activate(true); hs.timer.usleep(800000)
+    win = app:focusedWindow() or app:mainWindow()
+  end
   if not win then return nil, "LINEウィンドウ無し（最小化?）" end
   win:setFrame(hs.screen.primaryScreen():frame())
   hs.timer.usleep(800000)
