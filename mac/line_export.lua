@@ -324,7 +324,7 @@ local function lastRunDay()
 end
 
 local function screenLocked()
-  local props = hs.caffeinate.sessionProperties
+  local props = hs.caffeinate.sessionProperties()
   return props and props.CGSSessionScreenIsLocked or false
 end
 
