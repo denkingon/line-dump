@@ -109,7 +109,6 @@ local function openChat(app, name)
   local cell = findAX(axwin, function(e) return role(e) == "AXCell" end)
   if not cell then return false, "no search result" end
   cell:performAction("AXPress"); hs.timer.usleep(1200000)
-  hs.eventtap.keyStroke({}, "escape"); hs.timer.usleep(200000)
   return true
 end
 
