@@ -1,13 +1,17 @@
-last_run: 2026-10-17 21:02:23
-ok: 4
-ng: 9
+last_run: 2026-10-18 16:17:26
+ok: 0
+ng: 13
 failures:
-  - 3日後 ハートランド: search field not found
-  - かにっこにー: search field not found
-  - 山脇開生: search field not found
-  - パプリカ: search field not found
-  - p Koyo: search field not found
-  - H Village: search field not found
-  - il 石川ありがとう: search field not found
-  - いりべひでなり: search field not found
-  - 村田研: search field not found
+  - オーチュー/小林央忠: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - 3日後 ハートランド: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - かにっこにー: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - 山脇開生: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - Berry: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - パプリカ: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - p Koyo: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - H Village: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - np 雄太: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - il 石川ありがとう: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - いりべひでなり: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - 村田研: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
+  - mP-廣瀬舞: 保存ダイアログが出ない（型が "official" か、座標ズレ。⌘⌥⇧K で測り直す）
