@@ -108,7 +108,7 @@ line-dump/
 │   ├── ingest.py         書き出し txt → chats/ 正本の更新（スマホ版/Mac版 両対応）
 │   ├── bot_ingest.py     JSON → bot/ ・ slack/ アーカイブへ追記
 │   ├── line_parser.py    LINE txt の構造化（トーク名抽出・行判定に使用）
-│   └── tests/            unittest（48件。Mac 側の Lua テストも Lua 5.4 があれば回す）
+│   └── tests/            unittest（50件。Mac 側の Lua テストも Lua 5.4 があれば回す）
 ├── mac/                  Mac 側の自動書き出し（経路0）
 │   ├── line_export.lua   Hammerspoon: 毎日 LINE を操作して書き出す（v4: OCR で画面を読む）
 │   ├── ocr.applescript   macOS 標準の Vision OCR（文字と位置を返す）

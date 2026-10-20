@@ -90,6 +90,26 @@ class TestSyncSh(unittest.TestCase):
         self.assertEqual(self.git("diff", "--cached", "--name-only"), "", "index も元に戻した")
         self.assertNotIn("debug", r.stdout, "mac/debug/ は .gitignore で最初から入らない")
 
+    def test_refuses_images_with_japanese_names(self):
+        # 日本語名は git の通常の出力だと "..." で囲まれる。それでも見逃さない
+        for name in ("mac/トーク画面.jpg", "写真 1.HEIC"):
+            (self.work / name).write_bytes(b"x")
+        before = self.origin_log()
+        r = self.sync()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("mac/トーク画面.jpg", r.stdout)
+        self.assertIn("写真 1.HEIC", r.stdout)
+        self.assertEqual(self.origin_log(), before, "何も push していない")
+
+    def test_refuses_to_run_off_main(self):
+        self.git("checkout", "-q", "-b", "try-v4")
+        before = self.origin_log()
+        r = self.sync()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("main 以外のブランチ", r.stdout)
+        self.assertNotIn("push 完了", r.stdout)
+        self.assertEqual(self.origin_log(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

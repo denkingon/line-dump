@@ -139,6 +139,7 @@ local function writePng(path, w, h)
 end
 
 local function openSheet()
+  W.keysAtSheet = #W.keys
   W.sheet = { value = W.knobs.defaultName or ("[LINE]" .. W.open .. ".txt"), cursorEnd = false }
   W.focus = "sheet"
   if W.knobs.frontLostOnSheet then W.knobs.frontIsOther = true end
@@ -161,7 +162,7 @@ end
 local function click(pt)
   W.clickN = W.clickN + 1
   W.clicks[#W.clicks + 1] = { x = pt.x, y = pt.y }
-  W.mouse = { x = pt.x, y = pt.y }; W.lastHID = T
+  W.mouse = { x = pt.x, y = pt.y }; if not W.knobs.synthNoReset then W.lastHID = T end
   if W.knobs.userActsAtClick == W.clickN then W.pendingUser = "key" end
   if W.knobs.userMovesAtClick == W.clickN then W.pendingUser = "mouse" end
   if W.knobs.frontIsOther then W.clickedElsewhere = true; return end
@@ -302,6 +303,7 @@ local function winEl()
       } })
       local cells = {}
       for i, c in ipairs(results()) do
+        if c.noAX then goto skip end
         cells[#cells + 1] = el(frameAttrs({ AXRole = "AXCell", AXChildren = {
           el({ AXRole = "AXStaticText", AXValue = c.name }),
         } }, { x = L.field.x - 40, y = L.rowY(i) - 30, w = 330, h = 60 }),
@@ -309,6 +311,7 @@ local function winEl()
               if W.knobs.axPressFails then return "fail" end
               W.open = W.knobs.wrongChatOnClick or c.name; W.axPressed = c.name
             end })
+        ::skip::
       end
       local left = { el({ AXRole = "AXList", AXChildren = cells }) }
       if not hideField then table.insert(left, 1, fieldEl(L)) end
@@ -337,6 +340,7 @@ local otherWin = { id = function() return 77 end }
 local appObj = {
   bundleID = function() return "jp.naver.line.mac" end,
   pid = function() return LINE_PID end,
+  isFrontmost = function() return not W.knobs.frontIsOther end,
   allWindows = function() return W.win.exists and { winObj } or {} end,
   focusedWindow = function()
     if W.focusedOther then return otherWin end
@@ -377,6 +381,10 @@ local function execute(cmd)
     os.rename(src, dst); return "", true
   end
   if cmd:match("mdfind") then W.mdfindUsed = true; return W.knobs.mdfind or "", true end
+  if cmd:match("ioreg %-c IOHIDSystem") then
+    if W.knobs.noIoreg then return "", true end
+    return string.format("%d\n", math.floor((T - W.lastHID) * 1e9)), true
+  end
   if cmd:match("sync%.sh") then W.synced = W.synced + 1; return "push 完了\n", true end
   return "", true
 end
@@ -400,6 +408,7 @@ hs = {
   timer = {
     usleep = function(us)
       T = T + us / 1000000
+      if W.knobs.userBusy then W.mouse = { x = W.mouse.x + 1, y = W.mouse.y }; W.lastHID = T end
       -- 待っている間に人が戻ってきた
       if W.pendingUser == "key" then W.lastHID = T; W.pendingUser = nil end
       -- マウスだけ動いた（無操作時間の見張りをすり抜けても、位置の見張りで止まるか）
@@ -420,7 +429,8 @@ hs = {
       return { { isInUse = function() return W.knobs.cameraInUse == true end } }
     end,
   },
-  host = { idleTime = function() return T - W.lastHID end },
+  -- 本物と同じく 2^30 ns（約1.07秒）刻みの整数（切り捨て）
+  host = { idleTime = function() return math.floor((T - W.lastHID) * 1e9 / 2^30) end },
   mouse = { absolutePosition = function() return { x = W.mouse.x, y = W.mouse.y } end },
   hotkey = { bind = function() return { delete = function() end } end },
   alert = { show = function(s) W.alerts[#W.alerts + 1] = s end },
@@ -429,7 +439,7 @@ hs = {
     leftClick = click,
     keyStroke = function(mods, k)
       W.keys[#W.keys + 1] = table.concat(mods, "+") .. "+" .. k
-      W.lastHID = T
+      if not W.knobs.synthNoReset then W.lastHID = T end
       if W.knobs.frontIsOther then W.typedElsewhere = true; return end
       if k == "escape" then W.escape = true; W.win.visible = false; W.open = nil end
       if k == "v" and mods[1] == "cmd" then
@@ -440,7 +450,7 @@ hs = {
     end,
     keyStrokes = function(s)
       W.keys[#W.keys + 1] = "type:" .. s
-      W.lastHID = T
+      if not W.knobs.synthNoReset then W.lastHID = T end
       typeInto(s)
     end,
   },
@@ -458,9 +468,9 @@ hs = {
   screenRecordingState = function() return not W.knobs.noPermission end,
   application = {
     find = function() return W.running and appObj or nil end,
+    -- 本物は処理の途中では更新されない（コンソールから実行すると Hammerspoon のまま）
     frontmostApplication = function()
-      if W.knobs.frontIsOther then return { bundleID = function() return "com.apple.Notes" end } end
-      return appObj
+      return { bundleID = function() return "org.hammerspoon.Hammerspoon" end }
     end,
     applicationForPID = function(pid)
       local names = W.knobs.pidNames or {}
@@ -470,7 +480,18 @@ hs = {
   axuielement = {
     windowElement = function() return winEl() end,
     applicationElement = function()
-      return el({ AXRole = "AXApplication", AXWindows = function() return { winEl() } end })
+      return el({ AXRole = "AXApplication", AXWindows = function()
+        local ws = {}
+        -- LINE の設定画面など、保存とは関係ないダイアログ（先に並ぶ）
+        if W.knobs.otherDialog then
+          ws[#ws + 1] = el({ AXRole = "AXWindow", AXSubrole = "AXDialog", AXChildren = {
+            el({ AXRole = "AXTextField", AXValue = "表示名" }),
+            el({ AXRole = "AXButton", AXTitle = "閉じる" }, { AXPress = function() W.otherClosed = true end }),
+          } })
+        end
+        ws[#ws + 1] = winEl()
+        return ws
+      end })
     end,
     systemElementAtPosition = function(x, y)
       if overlayAt({ x = x, y = y }) then return el({ pid = OTHER_PID }) end
@@ -561,6 +582,16 @@ local function exportOne(name)
   if not ok then error(r1, 0) end
   return r1, r2
 end
+local function at9am(fn)
+  local realdate = os.date
+  os.date = function(fmt, ...)
+    if fmt == "*t" then local t = realdate("*t", ...); t.hour = 9; return t end
+    return realdate(fmt, ...)
+  end
+  local ok, err = pcall(fn)
+  os.date = realdate
+  if not ok then error(err, 0) end
+end
 local function heartbeat() return readfile(REPO .. "/mac/heartbeat.txt") or "" end
 local function line(hb, s) return hb:find("\n" .. s .. "\n", 1, true) ~= nil end
 
@@ -585,11 +616,13 @@ test("正規化と照合", function()
   check(score("", n("何か")) == 0, "空の名前は何にも一致しない")
   check(M._t.loose("オーチュー/小林央忠") == M._t.loose("オーチュー_小林央忠"), "保存名照合では / と _ を無視")
   local nm = M._t.nameMatches
-  check(nm("[LINE]かにっこにー.txt", "かにっこにー", true), "保存名: 完全一致")
-  check(not nm("[LINE]かにっこにー3.txt", "かにっこにー", true), "保存名: 完全一致を求める時は前方一致を通さない")
-  check(nm("[LINE]かにっこにー3.txt", "かにっこにー", false), "保存名: 部分一致を許す時")
-  check(nm("[LINE] Chat with Berry.txt", "Berry", true), "保存名: 英語表示")
-  check(not nm("プロフィール", "Berry", false), "保存名: [LINE] で始まらない物は通さない")
+  check(nm("[LINE]かにっこにー.txt", "かにっこにー"), "保存名: 完全一致")
+  check(not nm("[LINE]かにっこにー3.txt", "かにっこにー"), "保存名: 前方一致は通さない")
+  check(not nm("[LINE]村田研OB会.txt", "村田研"), "保存名: 部分一致は通さない")
+  check(nm("[LINE]パプリカ🌶️.txt", "パプリカ"), "保存名: 絵文字は無視")
+  check(nm("[LINE] Chat with Berry.txt", "Berry"), "保存名: 英語表示")
+  check(nm("[LINE] 田中とのトーク.txt", "田中"), "保存名: 「とのトーク」付き")
+  check(not nm("プロフィール", "Berry"), "保存名: [LINE] で始まらない物は通さない")
 end)
 
 test("メニュー項目の判定", function()
@@ -655,10 +688,23 @@ test("完全一致の行を優先（かにっこにー3 より かにっこに�
   safe()
 end)
 
-test("完全一致が無く候補が1つなら前方一致で開く（かにっこにー3）", function()
-  reset({ chats = chats({ "直承Jikisho", "かにっこにー3" }) })
-  local ok = exportOne("かにっこにー")
-  check(ok and W.saved:find("[LINE]かにっこにー3_", 1, true), "かにっこにー3 を保存: " .. tostring(W.saved))
+test("目的のトークが一覧に無く、名前を含む別トークが1つだけでも書き出さない", function()
+  -- 「村田研」が抜けて「村田研OB会」だけがある / 「かにっこにー」が無く「かにっこにー3」だけ
+  for _, case in ipairs({ { "村田研", "村田研OB会" }, { "かにっこにー", "かにっこにー3" } }) do
+    reset({ chats = chats({ "直承Jikisho", case[2] }) })
+    local ok, e = exportOne(case[1])
+    check(not ok and e.stage == "保存ダイアログ" and e.msg:find("合わない", 1, true),
+      case[1] .. ": 保存名で止める: " .. tostring(e and e.msg))
+    check(not W.saved and W.cancelled, case[1] .. ": 保存していない")
+    safe()
+  end
+end)
+
+test("…で切れた名前は部分一致で開き、保存名で完全一致を確かめる", function()
+  reset({ chats = { { name = "il 石川ありがとう", ocrRow = "il 石川ありが…（12）", noAX = true,
+                      preview = "il 石川ありがとうって言ってた" } } })
+  local ok = exportOne("il 石川ありがとう")
+  check(ok and W.saved and W.saved:find("[LINE]il 石川ありがとう_", 1, true), "書き出した: " .. tostring(W.saved))
   safe()
 end)
 
@@ -679,10 +725,19 @@ test("完全一致の行を OCR が読み違えても、AX の名前で完全一
   safe()
 end)
 
-test("最後のメッセージにトーク名が出ていても、候補は AX の名前で数える", function()
-  reset({ chats = { { name = "かにっこにー3", preview = "かにっこにー3の写真を送りました" } } })
-  local ok = exportOne("かにっこにー")
-  check(ok and W.saved and W.saved:find("[LINE]かにっこにー3_", 1, true), "1件として開いた: " .. tostring(W.saved))
+test("候補は行で数える（AX にしか・OCR にしか見えない行も1つと数える）", function()
+  -- かにっこにー4 の行は AX に出てこない。OCR では2行とも見える → 2件で止める
+  reset({ chats = { { name = "かにっこにー4", noAX = true }, { name = "かにっこにー3" } } })
+  local ok, e = exportOne("かにっこにー")
+  check(not ok and e.stage == "トーク選択" and e.msg:find("2 件", 1, true), "2件で止める: " .. tostring(e and e.msg))
+  check(not W.open, "何も開いていない")
+  safe()
+end)
+
+test("名前の絵文字を OCR が同じ字に読み違えても、AX で選んだ行のトークなら通す", function()
+  reset({ chats = { { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》（82]" } } })
+  local ok = exportOne("パプリカ")
+  check(ok and W.axPressed == "パプリカ🌶️", "AX の行を押して書き出した")
   safe()
 end)
 
@@ -1156,6 +1211,126 @@ test("途中でマウスを動かしたら、その場で止める", function()
   check(W.clickN == 1, "それ以上押していない")
 end)
 
+-- ===================== 2回目のレビューで見つかった穴 =====================
+test("ioreg が読めず idleTime が1秒刻みでも、誰も触らなければ止まらない", function()
+  reset({ knobs = { noIoreg = true } })
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  local r = M._t.runExport()
+  local hb = heartbeat()
+  check(r == "done" and not hb:find("中断", 1, true), "最後まで: \n" .. hb)
+  check(line(hb, "ok: " .. #M._t.targets), "全件 OK")
+end)
+
+test("自分の操作で無操作時間が戻らない Mac でも、誰も触らなければ止まらない", function()
+  reset({ knobs = { synthNoReset = true } })
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  local r = M._t.runExport()
+  check(r == "done" and not heartbeat():find("中断", 1, true), "最後まで: \n" .. heartbeat())
+end)
+
+test("ioreg が読めない時も、打ち続けていれば止まる", function()
+  reset({ chats = chats({ "Berry" }), knobs = { noIoreg = true } })
+  local M = load()
+  local app = assert(M._t.prepareApp())
+  M._t.beginRun(app)
+  local orig = hs.timer.usleep
+  hs.timer.usleep = function(us) orig(us); if W.clickN >= 1 then W.lastHID = T end end   -- 1回押した後から打ち続ける
+  local ok, err = pcall(M._t.exportOne, app, "Berry")
+  hs.timer.usleep = orig
+  M._t.endRun()
+  check(not ok and type(err) == "table" and err.abort, "中断した")
+end)
+
+test("手が動いている間は始めない（ホットキーや「許可」を押した直後）", function()
+  reset({ chats = chats({ "Berry" }), knobs = { userBusy = true } })
+  local M = load()
+  local r = M._t.runExport(false)
+  check(r == "aborted" and #W.clicks == 0, "何も押さずに戻った")
+  check(heartbeat() == "", "heartbeat も書いていない")
+end)
+
+test("前面アプリの古い値（NSWorkspace）には頼らない", function()
+  -- 偽物の frontmostApplication は常に Hammerspoon を返す。それでも動く
+  reset({ chats = chats({ "Berry" }) })
+  local ok = exportOne("Berry")
+  check(ok, "成功する")
+  safe()
+end)
+
+test("LINE が起動していなければ、起動だけして次の機会に回す", function()
+  reset({ chats = chats({ "Berry" }) })
+  W.running = false
+  local M = load()
+  local r = M._t.runExport(true)
+  check(r == "notready" and W.opens == 1, "起動だけした")
+  check(heartbeat() == "" and W.synced == 0, "heartbeat も push もしない")
+end)
+
+test("LINE の別のダイアログ（設定など）は保存ダイアログとみなさず、触らない", function()
+  reset({ chats = chats({ "Berry" }), knobs = { otherDialog = true } })
+  local ok = exportOne("Berry")
+  check(ok and not W.otherClosed, "別のダイアログには触らずに成功")
+  safe()
+end)
+
+test("フォーカスが分からない時はキーを送らず、AX で検索欄に入れる", function()
+  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { focusUnknown = true, focusIgnored = true, clickNoFocus = true } })
+  local ok = exportOne("Berry")
+  check(ok and W.searchSetByAX, "AX で入れて成功")
+  for i = 1, W.keysAtSheet or #W.keys do
+    check(W.keys[i] ~= "cmd+a" and W.keys[i] ~= "cmd+v", "検索の時にキーを送っていない: " .. W.keys[i])
+  end
+  safe()
+end)
+
+test("中断した日のやり直しは、済んだトークを飛ばして残りから進める", function()
+  reset()
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  local first = type(M._t.targets[1]) == "table" and M._t.targets[1][1] or M._t.targets[1]
+  local saves = 0
+  local origSet = hs.pasteboard.setContents
+  at9am(function()
+    W.knobs.userActsAtClick = 30
+    M._t.maybeRun()
+    local hb1 = heartbeat()
+    check(hb1:find("中断", 1, true), "1回目は中断: \n" .. hb1)
+    W.knobs.userActsAtClick = nil; W.clickN = 0; W.lastHID = T - 999
+    W.search = ""; W.saved = nil
+    local searched = {}
+    local orig = hs.eventtap.keyStroke
+    hs.eventtap.keyStroke = function(mods, k)
+      if k == "v" and W.focus == "search" then searched[#searched + 1] = W.clipboard end
+      return orig(mods, k)
+    end
+    M._t.maybeRun()
+    hs.eventtap.keyStroke = orig
+    for _, n in ipairs(searched) do check(n ~= first, "済んだ " .. first .. " は検索し直していない") end
+    local hb2 = heartbeat()
+    check(line(hb2, "ok: " .. #M._t.targets), "合わせて全件 OK: \n" .. hb2)
+  end)
+  hs.pasteboard.setContents = origSet
+end)
+
+test("昼になっても見送りが続く日は、理由を heartbeat に残す（1日1回）", function()
+  reset({ chats = chats({ "Berry" }), knobs = { cameraInUse = true } })
+  local M = load()
+  local realdate = os.date
+  os.date = function(fmt, ...)
+    if fmt == "*t" then local t = realdate("*t", ...); t.hour = 13; return t end
+    return realdate(fmt, ...)
+  end
+  local ok, err = pcall(function()
+    M._t.maybeRun(); M._t.maybeRun()
+  end)
+  os.date = realdate
+  if not ok then error(err, 0) end
+  check(heartbeat():find("note: 見送り中: カメラ使用中", 1, true), "理由を書いた: " .. heartbeat())
+  check(W.synced == 1 and #W.clicks == 0, "1回だけ push し、何も押していない")
+end)
+
 -- ===================== 1日分の実行 =====================
 test("runExport: 全件を回し、heartbeat に段と画像を書いて push する", function()
   reset()
@@ -1205,13 +1380,14 @@ test("runExport: 1件で想定外のエラーが出ても残りを続ける", fu
   local orig, n = hs.eventtap.leftClick, 0
   hs.eventtap.leftClick = function(pt)
     n = n + 1
-    if n == 1 then error("想定外") end
+    if n == 1 then error(HOME .. "/Document/line-dump/mac/line_export.lua:1: 想定外", 0) end
     return orig(pt)
   end
   M._t.runExport()
   hs.eventtap.leftClick = orig
   local hb = heartbeat()
   check(hb:find("[内部エラー]", 1, true), "内部エラーとして記録: \n" .. hb)
+  check(not hb:find(HOME, 1, true) and hb:find("~/Document/line-dump", 1, true), "エラー文のホームのパスは ~ に: \n" .. hb)
   check(M._t.tidy(HOME .. "/a/b.lua:3: x " .. HOME) == "~/a/b.lua:3: x ~", "ホームのパスを ~ にする")
   check(line(hb, "ng: 1") and line(hb, "ok: " .. (#M._t.targets - 1)), "失敗は1件だけ: \n" .. hb)
 end)
@@ -1230,16 +1406,6 @@ test("runExport: 人が戻ってきたら残りをやめ、heartbeat に中断�
   check(W.synced == 1, "結果は push する")
 end)
 
-local function at9am(fn)
-  local realdate = os.date
-  os.date = function(fmt, ...)
-    if fmt == "*t" then local t = realdate("*t", ...); t.hour = 9; return t end
-    return realdate(fmt, ...)
-  end
-  local ok, err = pcall(fn)
-  os.date = realdate
-  if not ok then error(err, 0) end
-end
 
 test("maybeRun: 中断した日は、また離席したらやり直す（上限あり）", function()
   reset()

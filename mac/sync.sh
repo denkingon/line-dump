@@ -41,6 +41,15 @@ fi
 cd "$REPO" || exit 1
 mkdir -p "$(dirname "$LOG")"
 
+# main 以外のブランチでは取り込みも push もしない（push origin main は
+# 手元の main を送るだけなので、別ブランチの commit は届かないのに
+# 「push 完了」と出てしまう）
+BRANCH="$(git symbolic-ref --short -q HEAD)"
+if [ "$BRANCH" != "main" ]; then
+  log "error: main 以外のブランチ（${BRANCH:-detached}）では取り込み・push しない"
+  exit 1
+fi
+
 # 他の端末やクラウド側の更新を先に取り込む（ローカル変更は保持）
 git pull --rebase --autostash origin main >>"$LOG" 2>&1 || log "warn: pull に失敗（続行）"
 
@@ -76,7 +85,10 @@ git add -A
 # 画像が紛れ込んでいたら commit も push もしない。このリポジトリは公開で、
 # 撮影画像にはトーク画面が写っている（line_export.lua はリポジトリの外に
 # 置くが、古い版や手違いで入った時の歯止め）。
-IMAGES="$(git diff --cached --name-only | grep -iE '\.(png|jpe?g|heic|gif|tiff?)$')"
+# 一覧は NUL 区切りで取る（日本語名は通常の出力だと "..." で囲まれて末尾が
+# 拡張子にならず、見逃すため）
+IMAGES="$(git diff --cached --name-only -z | tr '\0' '\n' |
+  grep -iE '\.(png|jpe?g|heic|heif|gif|tiff?|webp|bmp|mov|mp4)$')"
 if [ -n "$IMAGES" ]; then
   git reset -q
   log "error: 画像ファイルが commit に入りそうになったので中止（push していない）"
