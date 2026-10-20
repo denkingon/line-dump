@@ -8,8 +8,10 @@ mac/sync.log
 # v3 までの座標較正値（v4 では使わないが、Mac に残っている分を push しない）
 mac/calibration.lua
 
-# 失敗時の撮影画像（トーク画面が写るので絶対に push しない）
+# 撮影画像（トーク画面が写るので絶対に push しない）。line_export.lua は
+# ~/Library/Logs/line-dump/debug に置くが、念のためリポジトリ内も除外する
 mac/debug/
+*.png
 
 # Mac ごとの実行状態（いつ走ったか。環境依存なので共有しない）
 mac/.last_run

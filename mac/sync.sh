@@ -73,6 +73,16 @@ if [ -z "$(git status --porcelain)" ]; then
 fi
 
 git add -A
+# 画像が紛れ込んでいたら commit も push もしない。このリポジトリは公開で、
+# 撮影画像にはトーク画面が写っている（line_export.lua はリポジトリの外に
+# 置くが、古い版や手違いで入った時の歯止め）。
+IMAGES="$(git diff --cached --name-only | grep -iE '\.(png|jpe?g|heic|gif|tiff?)$')"
+if [ -n "$IMAGES" ]; then
+  git reset -q
+  log "error: 画像ファイルが commit に入りそうになったので中止（push していない）"
+  printf '%s\n' "$IMAGES" | while IFS= read -r f; do log "  $f"; done
+  exit 1
+fi
 git commit -q -m "mac: LINE書き出しを取り込み ($(date '+%Y-%m-%d %H:%M'))
 
 $SUMMARY" >>"$LOG" 2>&1
