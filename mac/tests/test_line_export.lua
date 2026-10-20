@@ -37,6 +37,7 @@ local function reset(opts)
                        REPO .. "/mac", OUT, ENV.TMPDIR }) do
     run("mkdir -p " .. sh(d))
   end
+  writefile(REPO .. "/mac/ocr.applescript", "-- 偽物（osascript は hs.execute の偽物が受ける）\n")
   W = {
     running = true,
     win = { x = 100, y = 100, w = 1000, h = 700, visible = true, minimized = false, exists = true },
@@ -106,7 +107,12 @@ end
 
 local function ocrOutput(cap)
   local lines = {}
-  for _, it in ipairs(visibleTexts()) do
+  local texts = visibleTexts()
+  -- 通知バナーなど LINE の窓の外のものは、画面を撮った時だけ写る
+  if cap.screen then
+    for _, b in ipairs(W.banners or {}) do texts[#texts + 1] = { s = b.s, x = W.win.x + b.dx, y = W.win.y + b.dy } end
+  end
+  for _, it in ipairs(texts) do
     if it.x >= cap.x and it.x <= cap.x + cap.w and it.y >= cap.y and it.y <= cap.y + cap.h then
       lines[#lines + 1] = string.format("%s\t%d\t%d\t%d\t%d", it.s,
         math.floor((it.x - cap.x) * SCALE + 0.5), math.floor((it.y - cap.y) * SCALE + 0.5),
@@ -187,7 +193,10 @@ local function el(attrs, actions)
       local v = attrs[k]; if type(v) == "function" then return v() end; return v
     end,
     setAttributeValue = function(self, k, v) if actions.set then actions.set(k, v) end; return self end,
-    performAction = function(self, a) if actions[a] then actions[a]() end; return self end,
+    performAction = function(self, a)
+      if actions[a] and actions[a]() == "fail" then return nil, "kAXErrorActionUnsupported" end
+      return self
+    end,
   }
 end
 local function frameAttrs(t, r)
@@ -212,13 +221,17 @@ local function sheetEl()
       doSave(p)
     end }),
     el({ AXRole = "AXButton", AXTitle = "キャンセル" }, { AXPress = function()
+      if W.sheet.confirm then return end            -- 上書き確認が出ている間は効かない
       W.sheet = nil; W.focus = nil; W.cancelled = true
     end }),
   }
   if s.confirm then
     kids[#kids + 1] = el({ AXRole = "AXSheet", AXChildren = {
-      el({ AXRole = "AXButton", AXTitle = "置き換え" }, { AXPress = function()
+      el({ AXRole = "AXButton", AXTitle = W.knobs.replaceTitle or "置き換える" }, { AXPress = function()
         W.replaced = true; doSave(W.sheet.confirm)
+      end }),
+      el({ AXRole = "AXButton", AXTitle = "キャンセル" }, { AXPress = function()
+        W.sheet.confirm = nil; W.alertCancelled = true
       end }),
     } })
   end
@@ -243,7 +256,10 @@ local function winEl()
         cells[#cells + 1] = el(frameAttrs({ AXRole = "AXCell", AXChildren = {
           el({ AXRole = "AXStaticText", AXValue = c.name }),
         } }, { x = L.field.x - 40, y = L.rowY(i) - 30, w = 330, h = 60 }),
-          { AXPress = function() W.open = W.knobs.wrongChatOnClick or c.name; W.axPressed = c.name end })
+          { AXPress = function()
+              if W.knobs.axPressFails then return "fail" end
+              W.open = W.knobs.wrongChatOnClick or c.name; W.axPressed = c.name
+            end })
       end
       local left = { el({ AXRole = "AXList", AXChildren = cells }) }
       if not hideField then
@@ -269,10 +285,16 @@ local winObj = {
   screen = function() return screenObj end,
   setFrame = function(_, r) if not W.knobs.noResize then W.win.x, W.win.y, W.win.w, W.win.h = r.x, r.y, r.w, r.h end end,
   snapshot = function() return nil end,
+  focus = function() if not W.knobs.cannotFocus then W.focusedOther = false end end,
 }
+local otherWin = { id = function() return 77 end }
 local appObj = {
+  bundleID = function() return "jp.naver.line.mac" end,
   allWindows = function() return W.win.exists and { winObj } or {} end,
-  focusedWindow = function() return W.win.visible and winObj or nil end,
+  focusedWindow = function()
+    if W.focusedOther then return otherWin end
+    return W.win.visible and winObj or nil
+  end,
   mainWindow = function() return W.win.exists and winObj or nil end,
   activate = function() end,
 }
@@ -283,11 +305,21 @@ local function execute(cmd)
   if x then
     if W.knobs.noCapture then return "", false end
     x, y, w, h = tonumber(x), tonumber(y), tonumber(w), tonumber(h)
-    writePng(path, w * SCALE, h * SCALE); W.caps[path] = { x = x, y = y, w = w, h = h }
+    writePng(path, w * SCALE, h * SCALE); W.caps[path] = { x = x, y = y, w = w, h = h, screen = true }
     return "", true
   end
-  local img = cmd:match("osascript '.-' '(.-)'$")
-  if img then return W.caps[img] and ocrOutput(W.caps[img]) or "", true end
+  local id, wpath = cmd:match("screencapture %-x %-o %-l (%d+) '(.-)'$")
+  if id then
+    if W.knobs.noCapture then return "", false end
+    local f = W.win
+    writePng(wpath, f.w * SCALE, f.h * SCALE); W.caps[wpath] = { x = f.x, y = f.y, w = f.w, h = f.h }
+    return "", true
+  end
+  local img = cmd:match("osascript '.-' '(.-)' 2>&1$")
+  if img then
+    if W.knobs.ocrFails then return "osascript: execution error: Vision が無い (-2700)\n", false end
+    return W.caps[img] and ocrOutput(W.caps[img]) or "", true
+  end
   if cmd:match("open %-b jp%.naver%.line%.mac") then
     W.opens = W.opens + 1; W.running = true; W.win.exists = true; W.win.visible = true
     return "", true
@@ -325,12 +357,14 @@ hs = {
     leftClick = click,
     keyStroke = function(mods, key)
       W.keys[#W.keys + 1] = table.concat(mods, "+") .. "+" .. key
+      if W.knobs.frontIsOther then W.typedElsewhere = true; return end
       if key == "escape" then W.escape = true; W.win.visible = false; W.open = nil end
       if key == "v" and mods[1] == "cmd" then paste() end
       if key == "right" and W.sheet and W.focus == "sheet" then W.sheet.cursorEnd = true end
     end,
     keyStrokes = function(s)
       W.keys[#W.keys + 1] = "type:" .. s
+      if W.knobs.frontIsOther then W.typedElsewhere = true; return end
       if W.focus == "search" then W.search = s end
     end,
   },
@@ -342,7 +376,13 @@ hs = {
   },
   screen = { primaryScreen = function() return screenObj end },
   screenRecordingState = function() return not W.knobs.noPermission end,
-  application = { find = function() return W.running and appObj or nil end },
+  application = {
+    find = function() return W.running and appObj or nil end,
+    frontmostApplication = function()
+      if W.knobs.frontIsOther then return { bundleID = function() return "com.apple.Notes" end } end
+      return appObj
+    end,
+  },
   axuielement = {
     windowElement = function() return winEl() end,
     applicationElement = function()
@@ -459,12 +499,16 @@ test("PNG の大きさ・OCR 出力の読み取り・日付スタンプ", functi
 
   local cap = { path = "/x", rect = { x = 100, y = 50 }, sx = 2, sy = 2 }
   local orig = hs.execute
-  hs.execute = function() return "トークを保存\t200\t100\t120\t30\n通知オフ\t200.0\t160\t80\t30\n壊れた行\n" end
+  hs.execute = function() return "トークを保存\t200\t100\t120\t30\n通知オフ\t200.0\t160\t80\t30\n壊れた行\n", true end
   local items = M._t.ocr(cap)
   hs.execute = orig
   check(#items == 2, "壊れた行は無視して2件")
   check(items[1].x == 200 and items[1].y == 100, "画像px→論理座標（÷2 + 撮影位置）")
   check(items[2].text == "通知オフ" and items[2].y == 130, "小数表記の座標も読む")
+  hs.execute = function() return "execution error: 何か (-2700)\n", false end
+  local none, why = M._t.ocr(cap)
+  hs.execute = orig
+  check(none == nil and why:find("OCR が動かない", 1, true), "osascript が失敗したら nil と理由")
 
   check(M._t.stampedName("[LINE]Berry.txt") == "[LINE]Berry_" .. TODAY .. ".txt", "日付を付ける")
   check(M._t.stampedName("[LINE]Berry_20261019.txt") == "[LINE]Berry_" .. TODAY .. ".txt", "古い日付は今日に")
@@ -710,6 +754,106 @@ test("画面の座標換算（窓が画面の途中にあっても押す所が�
   W.win.x, W.win.y = 300, 140
   local ok = exportOne("Berry")
   check(ok, "最大化できない窓でも成功")
+  safe()
+end)
+
+-- ===================== レビューで見つかった穴 =====================
+test("「かにっこにー」を押したのに「かにっこにー3」が開いたら止める", function()
+  reset({ chats = chats({ "かにっこにー3", "かにっこにー" }), knobs = { wrongChatOnClick = "かにっこにー3" } })
+  local ok, e = exportOne("かにっこにー")
+  check(not ok and e.stage == "トーク確認", "トーク確認で失敗: " .. tostring(e and e.stage))
+  check(not W.saved, "保存していない")
+  safe()
+end)
+
+test("完全一致の行から開いたのに保存名が前方一致なら止める", function()
+  reset({ chats = chats({ "かにっこにー" }), knobs = { defaultName = "[LINE]かにっこにー3.txt" } })
+  local ok, e = exportOne("かにっこにー")
+  check(not ok and e.stage == "保存ダイアログ", "保存ダイアログで失敗: " .. tostring(e and e.stage))
+  check(W.cancelled and not W.saved, "キャンセルして保存していない")
+  check(e.img and exists(REPO .. "/" .. e.img), "閉じる前の画面を残した")
+  safe()
+end)
+
+test("英語表示の保存名（[LINE] Chat with ○○.txt）も同じトークとみなす", function()
+  reset({ chats = chats({ "Berry" }), knobs = { defaultName = "[LINE] Chat with Berry.txt" } })
+  local ok = exportOne("Berry")
+  check(ok, "成功する")
+  safe()
+end)
+
+test("通知バナーに同じ名前が出ていても、ヘッダは LINE の窓から読む", function()
+  reset({ chats = { { name = "パプリカ🌶️", ocrHeader = "パプリカ（82）" } } })
+  W.banners = { { s = "パプリカ（82）", dx = 1250, dy = 30 } }
+  local ok = exportOne("パプリカ")
+  check(ok, "成功する（バナーの位置で ⋮ を押していない）")
+  safe()
+end)
+
+test("上書き確認の「置き換え」表記でも押す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { replaceTitle = "置き換え" } })
+  writefile(HOME .. "/Downloads/[LINE]Berry_" .. TODAY .. ".txt", "前回分")
+  local ok = exportOne("Berry")
+  check(ok and W.replaced, "置き換えて成功")
+  safe()
+end)
+
+test("日付を付けられず同名があるときは、上書きせずに止める", function()
+  reset({ chats = chats({ "Berry" }), knobs = { sheetIgnoresPaste = true, sheetIgnoresAXSet = true, saveDir = OUT } })
+  writefile(OUT .. "/[LINE]Berry.txt", "過去の書き出し")
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "保存", "保存で失敗: " .. tostring(e and e.stage))
+  check(readfile(OUT .. "/[LINE]Berry.txt") == "過去の書き出し", "過去の書き出しは無事")
+  check(not W.replaced and W.alertCancelled and not W.sheet, "上書き確認→保存ダイアログの順にキャンセルした")
+  safe()
+end)
+
+test("上書き確認が残ったままでも、次の件の前に両方閉じる", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }) })
+  W.open = "直承Jikisho"
+  W.sheet = { value = "[LINE]直承Jikisho.txt", confirm = HOME .. "/Downloads/x.txt" }; W.focus = "sheet"
+  local ok = exportOne("Berry")
+  check(W.alertCancelled and W.cancelled, "内側→外側の順に閉じた")
+  check(ok, "続けて成功")
+  safe()
+end)
+
+test("LINE が前面に来なければ、何も打ち込まずに止める", function()
+  reset({ chats = chats({ "Berry" }), knobs = { frontIsOther = true } })
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "窓", "窓で失敗: " .. tostring(e and e.stage))
+  check(not W.typedElsewhere, "他のアプリにキーを送っていない")
+  check(W.clipboard == "ORIGINAL", "クリップボードにも触っていない")
+end)
+
+test("別窓（ポップアウトしたトーク）がキー窓なら、メイン窓を前に出してから打つ", function()
+  reset({ chats = chats({ "Berry" }) })
+  W.focusedOther = true
+  local ok = exportOne("Berry")
+  check(ok, "成功する")
+  safe()
+end)
+
+test("メイン窓をキー窓にできなければ止める", function()
+  reset({ chats = chats({ "Berry" }), knobs = { cannotFocus = true } })
+  W.focusedOther = true
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "窓", "窓で失敗: " .. tostring(e and e.stage))
+  check(W.search == "", "検索欄にも打っていない")
+end)
+
+test("AX の行を押せなければ、その行の位置をクリックする", function()
+  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { ocrDropRows = true, axPressFails = true } })
+  local ok = exportOne("Berry")
+  check(ok, "クリックで開いて成功")
+  safe()
+end)
+
+test("OCR が動かなければ「OCR」の段で止める（別トーク扱いにしない）", function()
+  reset({ chats = chats({ "Berry" }), knobs = { ocrFails = true } })
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "OCR", "OCR で失敗: " .. tostring(e and e.stage))
+  check(e.msg:find("Vision", 1, true), "osascript のエラーを伝える: " .. tostring(e.msg))
   safe()
 end)
 

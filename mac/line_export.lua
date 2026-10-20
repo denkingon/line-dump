@@ -64,6 +64,8 @@ local L = {
   MENU_RETRY_DX   = -6,
   MENU_RETRY_DY   = 6,
   HEADER_H        = 130,  -- 窓の上端からこの高さまでをヘッダとみなす
+  MENU_W          = 360,  -- ⋮ から左へこの幅・下へ MENU_H をメニューの範囲とみなす
+  MENU_H          = 520,
 }
 -- ▲
 
@@ -74,6 +76,10 @@ local DEBUG_DIR   = REPO .. "/mac/debug"
 local DEBUG_KEEP_DAYS = 7
 local TMP = (os.getenv("TMPDIR") or "/tmp"):gsub("/+$", "")   -- 撮影の一時置き場
 local SAVE_LABELS = { "トークを保存", "Save chat" }   -- ⋮ メニューの項目名
+-- ⋮ メニューの他の項目。これが新しく見えたら「メニューは開いた」とみなす
+local MENU_HINTS  = { "通知オフ", "通知オン", "トーク履歴を削除", "退会", "ブロック",
+                      "非表示", "Notifications off", "Notifications on",
+                      "Delete chat history", "Leave", "Block", "Hide" }
 
 local function log(s) print(os.date("%H:%M:%S ") .. "[line-dump] " .. s) end
 local function wait(sec) hs.timer.usleep(math.floor(sec * 1000000)) end
@@ -147,14 +153,15 @@ end
 -- 保存名とトーク名の照合用。ファイル名では / が _ や : に化けるので記号も落とす。
 local function loose(s) return (norm(s):gsub("%p", "")) end
 
-local function isSaveLabel(n)
-  for _, lab in ipairs(SAVE_LABELS) do
+local function isLabel(n, labels)
+  for _, lab in ipairs(labels) do
     local ln = norm(lab)
     if n == ln then return true end
     if n:sub(1, #ln) == ln and (utf8.len(n) or 99) - utf8.len(ln) <= 2 then return true end
   end
   return false
 end
+local function isSaveLabel(n) return isLabel(n, SAVE_LABELS) end
 
 -- ---------- 撮影と OCR ----------
 local function pngSize(path)
@@ -167,17 +174,20 @@ local function pngSize(path)
   return u32(17), u32(21)
 end
 
--- 画面の矩形（論理座標）を撮る。窓単体（-l）ではなく画面を撮るのは、⋮ の
--- メニューが別窓として出た場合でも写すため（クリックが当たる見た目そのもの）。
--- 撮れなければ窓単体の撮影に落とす。
-local function capture(rect, tag, win)
+-- 撮影。既定は LINE の窓単体（-l）: 通知バナーや他のアプリが重なっていても
+-- LINE だけが写る。screenRect を渡すと画面のその矩形（-R）を撮る: ⋮ の
+-- メニューが別窓として出る場合でも写るので、メニューを読む時はこちら。
+local function capture(win, tag, screenRect)
   local path = TMP .. "/line_export_" .. tag .. ".png"
   os.remove(path)
-  local r = { x = math.floor(rect.x), y = math.floor(rect.y),
-              w = math.ceil(rect.w), h = math.ceil(rect.h) }
-  hs.execute(string.format("/usr/sbin/screencapture -x -R %d,%d,%d,%d %s",
-    r.x, r.y, r.w, r.h, sh(path)))
-  local pw, ph = pngSize(path)
+  local r, pw, ph
+  if screenRect then
+    r = { x = math.floor(screenRect.x), y = math.floor(screenRect.y),
+          w = math.ceil(screenRect.w), h = math.ceil(screenRect.h) }
+    hs.execute(string.format("/usr/sbin/screencapture -x -R %d,%d,%d,%d %s",
+      r.x, r.y, r.w, r.h, sh(path)))
+    pw, ph = pngSize(path)
+  end
   if not pw and win then
     r = win:frame()
     hs.execute(string.format("/usr/sbin/screencapture -x -o -l %d %s", win:id() or 0, sh(path)))
@@ -192,10 +202,14 @@ local function capture(rect, tag, win)
   return { path = path, rect = r, sx = pw / r.w, sy = ph / r.h }
 end
 
--- 画像を OCR し、各文字列の中心を画面の論理座標に直して返す
+-- 画像を OCR し、各文字列の中心を画面の論理座標に直して返す。
+-- OCR 自体が動かない時は nil と理由を返す（「文字が無い」と区別するため）。
 local function ocr(cap)
-  if not cap then return {} end
-  local out = hs.execute("/usr/bin/osascript " .. sh(OCR_SCRIPT) .. " " .. sh(cap.path))
+  if not cap then return nil, "画面を撮れない（画面収録の許可を確認）" end
+  local out, ok = hs.execute("/usr/bin/osascript " .. sh(OCR_SCRIPT) .. " " .. sh(cap.path) .. " 2>&1")
+  if not ok then
+    return nil, "OCR が動かない: " .. (out or ""):gsub("%s+", " "):sub(1, 200)
+  end
   local items = {}
   for line in (out or ""):gmatch("[^\r\n]+") do
     local s, cx, cy, w, h = line:match("^(.-)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)%s*$")
@@ -225,7 +239,7 @@ end
 local function safeName(s) return (tostring(s):gsub("[/:%c\\]", "_")) end
 
 local function keepDebug(name, stage, cap, win)
-  if not cap then cap = capture(screenOf(win), "fail", win) end
+  if not cap then cap = capture(win, "fail", screenOf(win)) end
   if not cap then return nil end
   hs.fs.mkdir(DEBUG_DIR)
   local rel = "mac/debug/" .. os.date("%Y%m%d-%H%M%S") .. "_" ..
@@ -269,32 +283,46 @@ local function axFrame(el)
   local f = attr(el, "AXFrame")
   if f and f.x then return f end
 end
+-- performAction は失敗しても例外を出さず、nil/false を返す
+local function press(el)
+  local ok, r = pcall(function() return el:performAction("AXPress") end)
+  return ok and r ~= nil and r ~= false
+end
 
--- 幅優先で探す。チャット欄は要素数が多いので、見る数に上限を設ける
-local function bfs(root, pred, budget)
+-- 幅優先で探す。チャット欄は要素数が多いので、見る数に上限を設ける。
+-- prune(el) が true の要素の中には入らない。
+local function bfs(root, pred, budget, prune)
   if not root then return nil end
   local q, head = { root }, 1
   while q[head] and head <= (budget or 3000) do
     local el = q[head]; head = head + 1
     if pred(el) then return el end
-    for _, c in ipairs(attr(el, "AXChildren") or {}) do q[#q + 1] = c end
+    if not (prune and prune(el)) then
+      for _, c in ipairs(attr(el, "AXChildren") or {}) do q[#q + 1] = c end
+    end
   end
   return nil
 end
-local function bfsAll(root, pred, budget)
+local function bfsAll(root, pred, budget, prune)
   local found = {}
-  bfs(root, function(e) if pred(e) then found[#found + 1] = e end; return false end, budget)
+  bfs(root, function(e) if pred(e) then found[#found + 1] = e end; return false end, budget, prune)
   return found
 end
 
--- トークリストの検索欄: 窓の上の方にある AXTextField（下のメッセージ入力欄と区別）
+-- トークリストの検索欄: 窓の上の方にある一番左の AXTextField。
+-- 下のメッセージ入力欄・トーク内検索の欄・保存シートの名前欄と取り違えない。
 local function searchField(win)
   local f = win:frame()
-  return bfs(hs.axuielement.windowElement(win), function(e)
-    if role(e) ~= "AXTextField" then return false end
+  local bestEl, bestF
+  for _, e in ipairs(bfsAll(hs.axuielement.windowElement(win),
+      function(e) return role(e) == "AXTextField" end, 2500,
+      function(e) return role(e) == "AXSheet" end)) do
     local r = axFrame(e)
-    return r ~= nil and r.y + r.h / 2 < f.y + f.h * 0.4
-  end)
+    if r and r.y + r.h / 2 < f.y + f.h * 0.4 and (not bestF or r.x < bestF.x) then
+      bestEl, bestF = e, r
+    end
+  end
+  return bestEl, bestF
 end
 
 -- 検索欄を持つ窓＝メイン窓。トークを別窓で開いていると focusedWindow が
@@ -311,6 +339,12 @@ local function findMain(app)
   return best
 end
 
+-- LINE が前面か。キー入力・貼り付けの前に必ず確かめる（他のアプリに打ち込まない）
+local function lineFront()
+  local a = hs.application.frontmostApplication()
+  return a ~= nil and a:bundleID() == LINE_BUNDLE
+end
+
 -- 保存シート（窓の子の AXSheet か、ダイアログ窓）
 local function findSheet(app)
   local axapp = hs.axuielement.applicationElement(app)
@@ -323,13 +357,32 @@ local function findSheet(app)
   end
   return nil
 end
-local function findButton(root, names)
+-- ボタンを題名で探す。prefix なら前方一致（「置き換える」「置き換え」の両方に合う）
+local function findButton(root, names, prefix)
   return bfs(root, function(e)
     if role(e) ~= "AXButton" then return false end
     local t = title(e)
-    for _, n in ipairs(names) do if t == n then return true end end
+    for _, n in ipairs(names) do
+      if t == n or (prefix and t:sub(1, #n) == n) then return true end
+    end
     return false
   end, 800)
+end
+
+-- 保存シートを閉じる。上書き確認などの内側のシートが出ていればそちらから。
+local function cancelSheet(app)
+  for _ = 1, 3 do
+    local sheet = findSheet(app)
+    if not sheet then return true end
+    local inner
+    for _, c in ipairs(attr(sheet, "AXChildren") or {}) do
+      inner = inner or bfs(c, function(e) return role(e) == "AXSheet" end, 400)
+    end
+    local b = findButton(inner or sheet, { "キャンセル", "Cancel" })
+    if not (b and press(b)) then return false end
+    wait(0.6)
+  end
+  return findSheet(app) == nil
 end
 
 -- 文字列を貼り付けで入力する。キー入力だと日本語入力が ON のとき崩れるため。
@@ -355,9 +408,12 @@ local function ensureWindow(app)
       if math.abs(f.w - sf.w) > 40 or math.abs(f.h - sf.h) > 40 then
         win:setFrame(sf, 0); wait(0.6)            -- 広い方が名前が切れずに読める
       end
-      return win
+      -- メイン窓を最前面・キー窓にする（別窓で開いたトークにキー入力が行かないように）
+      win:focus(); wait(0.4)
+      local fw = app:focusedWindow()
+      if lineFront() and (fw == nil or fw:id() == win:id()) then return win end
     end
-    -- 窓が無い・見えない・検索欄が読めない → Dock クリック相当で開き直す。
+    -- 窓が無い・見えない・検索欄が読めない・前面に来ない → Dock クリック相当で開き直す。
     -- hs.application.open / activate では窓が戻らない（実測）。Escape は使わない
     -- （LINE は Escape で窓やトークを閉じる。10/14 の連鎖失敗の元凶）。
     hs.execute("/usr/bin/open -b " .. LINE_BUNDLE); wait(2)
@@ -381,6 +437,7 @@ local function rowsByAX(win, paneX, below)
   return rows
 end
 
+-- 一番よく合うもの（同点なら上の方）とその強さ
 local function best(items, tn, inArea)
   local b, bs = nil, 0
   for _, it in ipairs(items) do
@@ -393,17 +450,19 @@ local function best(items, tn, inArea)
 end
 
 local function openChat(ctx, win)
-  local field = searchField(win)
-  local ff = field and axFrame(field)
+  local field, ff = searchField(win)
   if not ff then return fail(ctx, "検索欄", "検索欄が見つからない") end
   local f = win:frame()
   local paneX = ff.x + ff.w + 10               -- これより右がトーク欄
 
+  if not lineFront() then
+    return fail(ctx, "窓", "LINE が前面に無い（他のアプリに打ち込まないよう中止）")
+  end
   field:setAttributeValue("AXFocused", true); wait(0.2)
   hs.eventtap.keyStroke({"cmd"}, "a"); wait(0.1)
   pasteText(ctx.name); wait(1.2)
   local v = attr(field, "AXValue")
-  if v ~= nil and norm(v) ~= ctx.tn then        -- 貼り付けが効かない時はキー入力で
+  if v ~= nil and norm(v) ~= ctx.tn and lineFront() then   -- 貼り付けが効かない時はキー入力で
     field:setAttributeValue("AXFocused", true); wait(0.2)
     hs.eventtap.keyStroke({"cmd"}, "a"); wait(0.1)
     hs.eventtap.keyStrokes(ctx.name); wait(1.2)
@@ -411,11 +470,12 @@ local function openChat(ctx, win)
 
   -- 左ペイン（検索欄より下・トーク欄より左）を読んで、名前の行を探す。
   -- 検索結果の表示が遅れることがあるので、見つからなければ1回だけ読み直す。
-  local cap, row
+  local cap, items, oerr, row, rowScore
   for i = 1, 2 do
-    cap = capture(f, "list", win)
-    if not cap then return fail(ctx, "撮影", "画面を撮れない（画面収録の許可を確認）") end
-    row = best(ocr(cap), ctx.tn, function(it)
+    cap = capture(win, "list")
+    items, oerr = ocr(cap)
+    if not items then return fail(ctx, "OCR", oerr, cap) end
+    row, rowScore = best(items, ctx.tn, function(it)
       return it.y > ff.y + ff.h + 2 and it.x > ff.x - 80 and it.x < paneX
     end)
     if row or i == 2 then break end
@@ -426,28 +486,31 @@ local function openChat(ctx, win)
   else
     -- OCR で読めない時は AX のセル（トーク名が載っている）で探す。
     -- どちらで開いても、下のヘッダ確認を通らなければ先へ進まない。
-    local axRow = best(rowsByAX(win, paneX, ff.y + ff.h), ctx.tn, function() return true end)
+    local axRow
+    axRow, rowScore = best(rowsByAX(win, paneX, ff.y + ff.h), ctx.tn, function() return true end)
     if not axRow then
       return fail(ctx, "トーク選択", "検索結果に「" .. ctx.name .. "」が見えない", cap)
     end
-    if not pcall(function() axRow.el:performAction("AXPress") end) then
-      clickAt(axRow.x, axRow.y)
-    end
+    if not press(axRow.el) then clickAt(axRow.x, axRow.y) end
   end
   wait(1.2)
 
   -- ヘッダ（トーク欄の上端）を読んで、開いたのが目的のトークか確かめる。
-  -- 開くのに時間がかかることがあるので、合わなければ1回だけ読み直す。
+  -- 押した行と同じ強さで合うこと（「かにっこにー」の行を押したのに
+  -- 「かにっこにー3」が開いた、を通さない）。開くのに時間がかかることが
+  -- あるので、合わなければ1回だけ読み直す。
   local function inHeader(it)
     return it.x > paneX and it.y >= f.y and it.y < f.y + L.HEADER_H
   end
-  local items, hdr
+  local hdr, hdrScore
   for i = 1, 2 do
-    cap = capture(f, "header", win)
-    items = ocr(cap)
-    hdr = best(items, ctx.tn, inHeader)
-    if hdr or i == 2 then break end
-    wait(1.0)
+    cap = capture(win, "header")
+    items, oerr = ocr(cap)
+    if not items then return fail(ctx, "OCR", oerr, cap) end
+    hdr, hdrScore = best(items, ctx.tn, inHeader)
+    if hdr and hdrScore >= rowScore then break end
+    hdr = nil
+    if i == 1 then wait(1.0) end
   end
   if not hdr then
     local seen
@@ -457,7 +520,7 @@ local function openChat(ctx, win)
     return fail(ctx, "トーク確認", "開いたトークが違う（ヘッダ: 「" ..
       (seen and seen.text or "読めず") .. "」）", cap)
   end
-  return { header = hdr, before = items, paneX = paneX }
+  return { header = hdr, before = items, paneX = paneX, exact = rowScore == 3 }
 end
 
 -- ---------- 3. ⋮ →「トークを保存」 ----------
@@ -472,23 +535,30 @@ end
 
 local function pressSaveChat(ctx, win, st)
   local f = win:frame()
-  local function inMenu(it) return it.x > f.x + f.w * 0.4 and it.y > st.header.y - 10 end
+  local dotsX = f.x + f.w - L.MENU_FROM_RIGHT
+  -- メニューは ⋮ の左下に開く。その範囲の、押す前に無かった文字だけを見る
+  local function inMenu(it)
+    return it.x > dotsX - L.MENU_W and it.x < f.x + f.w + 40
+       and it.y > st.header.y - 10 and it.y < st.header.y + L.MENU_H
+  end
   local lastCap, opened = nil, false
   for i, d in ipairs({ { 0, 0 }, { L.MENU_RETRY_DX, L.MENU_RETRY_DY } }) do
-    clickAt(f.x + f.w - L.MENU_FROM_RIGHT + d[1], st.header.y + d[2]); wait(0.8)
-    lastCap = capture(screenOf(win), "menu" .. i, win)
-    local items = ocr(lastCap)
-    local hit, fresh = nil, 0
+    clickAt(dotsX + d[1], st.header.y + d[2]); wait(0.8)
+    lastCap = capture(win, "menu" .. i, screenOf(win))
+    local items, oerr = ocr(lastCap)
+    if not items then return fail(ctx, "OCR", oerr, lastCap) end
+    local hit, fresh, hint = nil, 0, false
     for _, it in ipairs(items) do
       if inMenu(it) and isNew(it, st.before) then
         fresh = fresh + 1
+        if isLabel(it.n, MENU_HINTS) then hint = true end
         if isSaveLabel(it.n) and (not hit or it.y < hit.y) then hit = it end
       end
     end
     if hit then clickAt(hit.x, hit.y); return true end
-    -- 何か開いたのに目的の項目が無い → ヘッダのトーク名を押して閉じる
+    -- 開いたのに目的の項目が無い → ヘッダのトーク名を押して閉じる
     -- （Escape は窓/トークを閉じるので使わない）
-    if fresh >= 2 then
+    if hint or fresh >= 3 then
       opened = true
       clickAt(st.header.x, st.header.y); wait(0.6)
     end
@@ -496,7 +566,7 @@ local function pressSaveChat(ctx, win, st)
   if opened then
     return fail(ctx, "メニュー", "メニューは開いたが「トークを保存」が見当たらない", lastCap)
   end
-  return fail(ctx, "メニュー", "⋮ を押してもメニューが出ない", lastCap)
+  return fail(ctx, "メニュー", "⋮ を押してもメニューが出ない（⋮ の位置: L.MENU_FROM_RIGHT）", lastCap)
 end
 
 -- ---------- 4. 保存 → OUT_DIR へ移す ----------
@@ -515,10 +585,11 @@ local function nameField(sheet)
   return fields[1]
 end
 
-local function cancelSheet(app)
-  local sheet = findSheet(app)
-  local b = sheet and findButton(sheet, { "キャンセル", "Cancel" })
-  if b then b:performAction("AXPress"); wait(0.6) end
+-- 保存シートが出ている段の失敗: 閉じる前の画面を残してからキャンセルする
+local function failSheet(ctx, app, stage, msg)
+  local shot = capture(ctx.win, "save", screenOf(ctx.win))
+  cancelSheet(app)
+  return fail(ctx, stage, msg, shot)
 end
 
 -- 保存先の候補。保存パネルは前回の場所を覚えるので、OUT_DIR に直接
@@ -542,22 +613,28 @@ local function findSaved(fname, since)
   return nil
 end
 
-local function saveAndMove(ctx, app)
+-- 保存名の本体（[LINE] と .txt と英語表示の Chat with を除いたもの）がトーク名と合うか。
+-- 完全一致の行から開いた時は、保存名も完全一致を求める。
+local function nameMatches(cur, name, exact)
+  if not cur:match("^%[LINE%]") then return true end      -- 見慣れない形式は判定しない
+  local b = loose((cur:gsub("%.txt$", ""):gsub("^%[LINE%]", "")))
+  b = b:gsub("^chatwith", "")
+  local n = loose(name)
+  if b == "" or n == "" then return true end
+  if exact then return b == n end
+  return b:find(n, 1, true) ~= nil or n:find(b, 1, true) ~= nil
+end
+
+local function saveAndMove(ctx, app, st)
   local sheet = waitFor(function() return findSheet(app) end, 6)
   if not sheet then return fail(ctx, "保存ダイアログ", "「トークを保存」を押しても保存ダイアログが出ない") end
   local field = waitFor(function() return nameField(sheet) end, 2)
   local cur = field and tostring(attr(field, "AXValue") or "") or ""
-  if cur == "" then
-    cancelSheet(app); return fail(ctx, "保存ダイアログ", "ファイル名欄が読めない")
-  end
+  if cur == "" then return failSheet(ctx, app, "保存ダイアログ", "ファイル名欄が読めない") end
 
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
-  local body = cur:gsub("%.txt$", ""):gsub("^%[LINE%]", "")
-  if cur:match("^%[LINE%]") and loose(body) ~= "" and loose(ctx.name) ~= ""
-     and not loose(body):find(loose(ctx.name), 1, true)
-     and not loose(ctx.name):find(loose(body), 1, true) then
-    cancelSheet(app)
-    return fail(ctx, "保存ダイアログ", "保存名「" .. cur .. "」がトーク名と合わない")
+  if not nameMatches(cur, ctx.name, st.exact) then
+    return failSheet(ctx, app, "保存ダイアログ", "保存名「" .. cur .. "」がトーク名と合わない")
   end
 
   -- ファイル名に書き出し日を付ける（[LINE]○○_20261020.txt）。既定名は毎回
@@ -565,7 +642,7 @@ local function saveAndMove(ctx, app)
   -- 履歴を失う。名前欄は拡張子の手前まで選択された状態で開くので、
   -- →キーで選択を解いてカーソルをそこへ置き、日付を足す。
   local want = cur:match("%.txt$") and stampedName(cur) or (stampedName(cur):gsub("%.txt$", ""))
-  if not cur:gsub("%.txt$", ""):match("_%d%d%d%d%d%d%d%d$") then
+  if not cur:gsub("%.txt$", ""):match("_%d%d%d%d%d%d%d%d$") and lineFront() then
     hs.eventtap.keyStroke({}, "right"); wait(0.1)
     pasteText("_" .. today()); wait(0.2)
   end
@@ -574,7 +651,8 @@ local function saveAndMove(ctx, app)
     field:setAttributeValue("AXValue", want); wait(0.2)
     now = tostring(attr(field, "AXValue") or "")
   end
-  if now ~= want then
+  local stamped = now == want
+  if not stamped then
     log("warn: " .. ctx.name .. " のファイル名に日付を付けられず（移すときに付ける）")
   end
   local savedAs = now ~= "" and now or cur
@@ -582,16 +660,22 @@ local function saveAndMove(ctx, app)
 
   local since = os.time()
   local save = findButton(sheet, { "保存", "Save" })
-  if not save then cancelSheet(app); return fail(ctx, "保存", "「保存」ボタンが見つからない") end
-  save:performAction("AXPress"); wait(0.8)
+  if not save then return failSheet(ctx, app, "保存", "「保存」ボタンが見つからない") end
+  press(save); wait(0.8)
+  -- 同名があると上書き確認が出る（「置き換える」/「置き換え」/ Replace）。
+  -- 日付が付いた名前なら今日の分なので置き換えてよい。日付なしの名前は
+  -- 過去の書き出しを上書きしうるので、置き換えずに止める。
   local repl = waitFor(function()
-    local s = findSheet(app); return s and findButton(s, { "置き換え", "Replace" })
+    local s = findSheet(app); return s and findButton(s, { "置き換え", "Replace" }, true)
   end, 1.5)
-  if repl then repl:performAction("AXPress"); wait(0.7) end
+  if repl then
+    if not stamped then
+      return failSheet(ctx, app, "保存", "日付を付けられず、同名ファイルの上書きになるので中止")
+    end
+    press(repl); wait(0.7)
+  end
   if waitFor(function() return not findSheet(app) end, 5) == nil then
-    local shot = capture(screenOf(ctx.win), "save", ctx.win)
-    cancelSheet(app)
-    return fail(ctx, "保存", "保存ダイアログが閉じない（保存できていない）", shot)
+    return failSheet(ctx, app, "保存", "保存ダイアログが閉じない（保存できていない）")
   end
 
   local src = waitFor(function() return findSaved(savedAs, since) end, 6, 0.5)
@@ -604,7 +688,8 @@ local function saveAndMove(ctx, app)
 
   -- ---------- 5. 確認 ----------
   if (hs.fs.attributes(dst, "size") or 0) == 0 then
-    return fail(ctx, "確認", "OUT_DIR に今日付きのファイルが無い（" .. src .. "）")
+    return fail(ctx, "移動", "Linetxt に移せない（" .. src .. "）。ダウンロード等への" ..
+      "アクセス許可を確認（docs/setup-mac-auto.md 手順3）")
   end
   return dst
 end
@@ -613,12 +698,13 @@ local function exportOne(app, name)
   local ctx = { name = name, tn = norm(name) }
   local win = ensureWindow(app)
   ctx.win = win
-  if not win then return false, select(2, fail(ctx, "窓", "LINE の窓が開かない（検索欄のある窓が無い）")) end
+  if not win then
+    return false, select(2, fail(ctx, "窓", "LINE の窓が開かない・前面に来ない（検索欄のある窓が無い）"))
+  end
   -- 前の件の保存ダイアログが残っていると、以降のクリックが全部効かない
   if findSheet(app) then
     log("warn: 前の保存ダイアログが残っていたのでキャンセルする")
-    cancelSheet(app)
-    if findSheet(app) then
+    if not cancelSheet(app) then
       return false, select(2, fail(ctx, "窓", "残っていた保存ダイアログを閉じられない"))
     end
   end
@@ -626,7 +712,7 @@ local function exportOne(app, name)
   if not st then return false, e end
   local ok; ok, e = pressSaveChat(ctx, win, st)
   if not ok then return false, e end
-  local dst; dst, e = saveAndMove(ctx, app)
+  local dst; dst, e = saveAndMove(ctx, app, st)
   if not dst then return false, e end
   return true, dst
 end
@@ -646,6 +732,9 @@ local function prepareApp()
     app = hs.application.find(LINE_BUNDLE)
   end
   if not app then return nil, "LINE を起動できない" end
+  if hs.fs.attributes(OCR_SCRIPT, "mode") ~= "file" then
+    return nil, "OCR スクリプトが無い: " .. OCR_SCRIPT
+  end
   if hs.fs.attributes(OUT_DIR, "mode") ~= "directory" then
     return nil, "保存先フォルダが無い: " .. OUT_DIR
   end
@@ -740,8 +829,9 @@ function M.diag()
   local win = app and (findMain(app) or app:focusedWindow() or app:mainWindow())
   if not win then hs.alert.show("LINEの窓が見つからない", 3); return end
   app:activate(true); wait(0.5)
-  local cap = capture(screenOf(win), "diag", win)
-  local items = ocr(cap)
+  local cap = capture(win, "diag", screenOf(win))
+  local items, oerr = ocr(cap)
+  if not items then print("OCR 診断: " .. oerr); hs.alert.show(oerr, 5); return end
   local f = win:frame()
   print(string.format("=== OCR 診断 %d件（画面収録: %s / 窓 x=%.0f y=%.0f w=%.0f h=%.0f）===",
     #items, screenRecordingOK() and "許可" or "未許可", f.x, f.y, f.w, f.h))
@@ -859,6 +949,7 @@ end)
 -- テスト用（mac/tests/test_line_export.lua から中身を検証する）
 M._t = {
   norm = norm, score = score, loose = loose, isSaveLabel = isSaveLabel,
+  nameMatches = nameMatches,
   pngSize = pngSize, ocr = ocr, capture = capture, stampedName = stampedName,
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO,
