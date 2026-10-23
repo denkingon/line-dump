@@ -100,7 +100,11 @@ local function visibleTexts(screen)
   local function add(s, x, y) t[#t + 1] = { s = s, x = x, y = y } end
   if not W.win.visible then return t end
   add(W.knobs.winTitle or "LINE", W.win.x + W.win.w / 2, W.win.y + 12)   -- 窓のタイトル
-  add(W.search ~= "" and W.search or "検索", L.field.x + L.field.w / 2, L.field.y + L.field.h / 2)
+  -- 検索欄の文字（実機では虫眼鏡のアイコンが字として前に付くことがある: searchPrefix）
+  if not W.knobs.searchUnread then
+    add(W.search ~= "" and ((W.knobs.searchPrefix or "") .. W.search) or "検索",
+      L.field.x + L.field.w / 2, L.field.y + L.field.h / 2)
+  end
   -- 一覧の列の中・検索欄と同じ高さにある物（検索欄の AX の枠より右。実機ではアイコン等）
   if W.knobs.listJunk then add(W.knobs.listJunk, L.field.x + 230, L.field.y + L.field.h / 2) end
   -- 検索中は検索欄の下に絞り込みのタブが並ぶ
@@ -263,8 +267,11 @@ local function el(attrs, actions)
     setTimeout = function() return true end,
   }
 end
+-- LINE の部品の AX の位置。axDY の分だけ画面に写る位置からずれて報告される
+-- （実機: フルスクリーンで 30pt 下）
 local function frameAttrs(t, r)
-  t.AXPosition = { x = r.x, y = r.y }; t.AXSize = { w = r.w, h = r.h }; return t
+  local dy = W.knobs.axDY or 0
+  t.AXPosition = { x = r.x, y = r.y + dy }; t.AXSize = { w = r.w, h = r.h }; return t
 end
 
 local function sheetEl()
@@ -340,7 +347,8 @@ local function winEl()
       for i, c in ipairs(results()) do
         if c.noAX then goto skip end
         cells[#cells + 1] = el(frameAttrs({ AXRole = "AXCell", AXChildren = {
-          el({ AXRole = "AXStaticText", AXValue = c.name }),
+          el(frameAttrs({ AXRole = "AXStaticText", AXValue = c.name },
+                        { x = L.field.x - 30, y = L.rowY(i) - 10, w = 220, h = 20 })),
         } }, { x = L.field.x - 40, y = L.rowY(i) - 30, w = 330, h = 60 }),
           { AXPress = function()
               if W.knobs.axPressFails then return "fail" end
@@ -348,6 +356,10 @@ local function winEl()
               W.openLog[#W.openLog + 1] = c.name
             end })
         ::skip::
+      end
+      -- 実機: 検索結果の画面に、幅の無い（右端 x=0 の）セルが1個だけあった
+      if W.knobs.bogusCell then
+        table.insert(cells, 1, el(frameAttrs({ AXRole = "AXCell" }, { x = W.win.x - W.win.x, y = L.field.y + 60, w = 0, h = 0 })))
       end
       local left = { el({ AXRole = "AXList", AXChildren = cells }) }
       if W.knobs.splitterX then
@@ -801,11 +813,13 @@ test("…で切れた名前は部分一致で開き、保存名で完全一致�
   safe()
 end)
 
-test("完全一致が無く候補が複数なら決めずに止める（別トークを書き出さない）", function()
+test("完全一致が無く候補が複数なら順に開き、保存名が違えば保存せずに次へ（全部違えば止める）", function()
   reset({ chats = chats({ "かにっこにー3", "かにっこにー4" }) })
   local ok, e = exportOne("かにっこにー")
-  check(not ok and e.stage == "トーク選択" and e.msg:find("2 件", 1, true), "候補2件で止める: " .. tostring(e and e.msg))
-  check(not W.open and not W.saved, "何も開いていない")
+  check(not ok and e.stage == "保存ダイアログ" and e.msg:find("合わない", 1, true), "保存名で止める: " .. tostring(e and e.msg))
+  check(#W.openLog == 2 and W.openLog[1] == "かにっこにー3" and W.openLog[2] == "かにっこにー4",
+    "2件とも開いて確かめた: " .. table.concat(W.openLog, ","))
+  check(not W.saved and W.cancelled and not W.sheet, "保存していない（ダイアログは閉じた）")
   safe()
 end)
 
@@ -819,11 +833,96 @@ test("完全一致の行を OCR が読み違えても、AX の名前で完全一
 end)
 
 test("候補は行で数える（AX にしか・OCR にしか見えない行も1つと数える）", function()
-  -- かにっこにー4 の行は AX に出てこない。OCR では2行とも見える → 2件で止める
+  -- かにっこにー4 の行は AX に出てこない。OCR では2行とも見える → 2件（同じ行を2度開かない）
   reset({ chats = { { name = "かにっこにー4", noAX = true }, { name = "かにっこにー3" } } })
   local ok, e = exportOne("かにっこにー")
-  check(not ok and e.stage == "トーク選択" and e.msg:find("2 件", 1, true), "2件で止める: " .. tostring(e and e.msg))
-  check(not W.open, "何も開いていない")
+  check(not ok and e.msg:find("合わない", 1, true), "保存名で止める: " .. tostring(e and e.msg))
+  check(#W.openLog == 2 and W.openLog[1] ~= W.openLog[2], "2行を1回ずつ開いた: " .. table.concat(W.openLog, ","))
+  check(not W.saved, "保存していない")
+  safe()
+end)
+
+test("フルスクリーン（LINE が AX で教える位置が画面より 30pt 下）でも、ヘッダを読んで ⋮ を押して保存する", function()
+  for _, k in ipairs({ { axDY = 30, searchPrefix = "Q " }, { axDY = 30, focusIgnored = true },
+                       { axDY = 30, searchUnread = true }, { axDY = -20 }, { axDY = 0 } }) do
+    reset({ chats = chats({ "直承Jikisho", "Berry" }) })
+    for kk, v in pairs(k) do W.knobs[kk] = v end
+    W.knobs.paneTop = "裏フェス Urafess"           -- トーク欄の上端の別の文字（ヘッダと取り違えない）
+    local ok, e = exportOne("Berry")
+    local tag = "axDY=" .. k.axDY .. (k.focusIgnored and " 押してフォーカス" or "") .. (k.searchUnread and " 検索欄が読めない" or "")
+    check(ok and W.saved and W.saved:find("[LINE]Berry_", 1, true), tag .. ": 保存した: " .. tostring(e and e.msg))
+    local L, hitDots = layout(), false
+    for _, c in ipairs(W.clicks) do
+      if math.abs(c.x - L.dots.x) < 5 and math.abs(c.y - L.dots.y) < 5 then hitDots = true end
+    end
+    check(hitDots, tag .. ": 画面の ⋮ の位置を押した")
+    safe()
+  end
+end)
+
+test("ずれは毎回測る（同じ実行の中でフルスクリーンから窓表示に変わっても合わせる）", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }) })
+  W.knobs.axDY = 30
+  local M = load()
+  local app = assert(M._t.prepareApp())
+  M._t.beginRun(app)
+  local ok1 = M._t.exportOne(app, "Berry")
+  W.knobs.axDY = 0
+  local ok2 = M._t.exportOne(app, "直承Jikisho")
+  M._t.endRun()
+  check(ok1 and ok2, "どちらも書き出した")
+  safe()
+end)
+
+test("幅の無いセルを一覧とトーク欄の境目に使わない（実機: 右端 x=0 のセルで全件を見失った）", function()
+  -- 実機と同じく、一覧の AX のセルはその1個だけ（検索結果の行は AX に出ない）
+  reset({ chats = { { name = "直承Jikisho", noAX = true }, { name = "Berry", noAX = true } } })
+  W.knobs.bogusCell = true; W.knobs.axDY = 30
+  local ok, e = exportOne("Berry")
+  check(ok, "書き出した: " .. tostring(e and e.msg))
+  local M = load(); W.logs = {}
+  M.diag()
+  local out = table.concat(W.logs, "\n")
+  check(not out:find("境目 x=0（", 1, true) and out:find("境目 x=", 1, true), "境目が x=0 でない:\n" .. out)
+  check(out:find("ずれ %-30pt") , "ずれを診断に出す:\n" .. out)
+end)
+
+test("検索欄の文字の照合（OCR の読み違い・虫眼鏡のアイコンが付いても同じ）", function()
+  reset()
+  local M = load()
+  local n, same = M._t.norm, M._t.sameText
+  check(same(n("H Village"), n("Q H Village")), "アイコンが前に付く")
+  check(same(n("il 石川ありがとう"), n("i1 石川ありがとう")), "1字の読み違い")
+  check(not same(n("Berry"), n("すべて")), "別の文字")
+  check(not same(n("村田研"), n("村田研の会議の議事録とその他のメモ")), "長すぎる文字は別物")
+end)
+
+test("部分一致の候補は、名前より余分な字が少ない順（絵文字を OCR が1字に読んだトークが先）", function()
+  reset({ chats = { { name = "パプリカ定例会" },
+                    { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } })
+  local ok = exportOne("パプリカ")
+  check(ok and W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ を保存: " .. tostring(W.saved))
+  check(#W.openLog == 1 and W.openLog[1] == "パプリカ🌶️", "別のトークは開いていない: " .. table.concat(W.openLog, ","))
+  safe()
+end)
+
+test("部分一致で先に開いたのが別のトークなら、保存せずに次の候補を開いて保存する", function()
+  reset({ chats = { { name = "パプリカ会" },
+                    { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } })
+  local ok = exportOne("パプリカ")
+  check(ok and W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ を保存: " .. tostring(W.saved))
+  check(table.concat(W.openLog, ",") == "パプリカ会,パプリカ🌶️", "順に開いた: " .. table.concat(W.openLog, ","))
+  check(W.cancelled, "別のトークの保存ダイアログはキャンセルした")
+  check(not exists(OUT .. "/[LINE]パプリカ会_" .. TODAY .. ".txt"), "別のトークは保存していない")
+  safe()
+end)
+
+test("部分一致の候補は3件まで（それ以上は開かない）", function()
+  reset({ chats = chats({ "村田研A", "村田研B", "村田研C", "村田研D" }) })
+  local ok, e = exportOne("村田研")
+  check(not ok and e.msg:find("合わない", 1, true), "保存名で止める: " .. tostring(e and e.msg))
+  check(#W.openLog == 3, "3件まで: " .. table.concat(W.openLog, ","))
+  check(not W.saved, "保存していない")
   safe()
 end)
 
