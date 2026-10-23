@@ -84,8 +84,10 @@ local L = {
   MENU_W          = 360,  -- ⋮ から左へこの幅・下へ MENU_H をメニューの範囲とみなす
   MENU_H          = 520,
   -- LINE が AX で教える位置と画面に写る位置のずれは毎回測る（窓の出し方で
-  -- 変わる）。この幅より大きいずれは測り違いとみなす
+  -- 変わる）。AX の位置は画面より下にずれる（実機: フルスクリーンで 30pt、窓表示で 0）。
+  -- 上へ SHIFT_MAX より大きい・下へ SHIFT_UP より大きいずれは測り違いとみなす
   SHIFT_MAX       = 80,
+  SHIFT_UP        = 12,
   -- 今のトーク名を集める時に読む一覧のページ数の上限（1ページ＝一覧の高さ分）
   NAME_PAGES      = 15,
 }
@@ -799,16 +801,24 @@ end
 local function measureShift(win, field, ffAX, items)
   local cy = ffAX.y + ffAX.h / 2
   local v = norm(attr(field, "AXValue") or "")
-  -- 1) 検索欄の文字。一覧の行に同じ名前があっても、検索欄はその上なので一番上の物
-  local best
+  -- 1) 検索欄の行に写っている物: 入れた文字 > 虫眼鏡のアイコン（左端の1字）>「…を検索」の表示。
+  --    AX の位置より下（SHIFT_UP より下）の物は使わない: 検索結果の一覧の行にも同じ名前が
+  --    並ぶ（実機の窓表示: 検索欄には入れた文字が写らず「…を検索」のままで、すぐ下の
+  --    結果の行の名前を検索欄の文字と取り違え、ずれを +75pt と測った）
+  local text, icon, hint
   for _, it in ipairs(items) do
-    if it.x >= ffAX.x - 10 and it.x <= ffAX.x + ffAX.w + 10 and math.abs(it.y - cy) <= L.SHIFT_MAX
-       and (v ~= "" and sameText(v, it.n) or v == "" and isLabel(it.n, PLACEHOLDERS))
-       and (not best or it.y < best.y) then
-      best = it
+    local d = it.y - cy
+    if d <= L.SHIFT_UP and -d <= L.SHIFT_MAX and it.x >= ffAX.x - 10 and it.x <= ffAX.x + ffAX.w + 10 then
+      if v ~= "" and sameText(v, it.n) and (not text or it.y < text.y) then text = it end
+      if (utf8.len(it.n) or 0) <= 1 and it.x >= ffAX.x + 5 and it.x <= ffAX.x + 40
+         and (not icon or math.abs(d) < math.abs(icon.y - cy)) then icon = it end
+      if (isLabel(it.n, PLACEHOLDERS) or it.n:find("検索", 1, true) or it.n:find("search", 1, true))
+         and (not hint or math.abs(d) < math.abs(hint.y - cy)) then hint = it end
     end
   end
-  if best then return best.y - cy, v ~= "" and "検索欄の文字" or "検索欄の「検索」の表示" end
+  if text then return text.y - cy, "検索欄の文字" end
+  if icon then return icon.y - cy, "検索欄の虫眼鏡" end
+  if hint then return hint.y - cy, "検索欄の「検索」の表示" end
   -- 2) 一覧のセルの名前（AX の文字の位置と、同じ文字の OCR の位置の差。2つ以上が合う時だけ）
   local diffs = {}
   for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
@@ -826,7 +836,8 @@ local function measureShift(win, field, ffAX, items)
           hit = it
         end
       end
-      if hit then diffs[#diffs + 1] = hit.y - (tr.y + tr.h / 2) end
+      local d = hit and hit.y - (tr.y + tr.h / 2)
+      if d and d <= L.SHIFT_UP and -d <= L.SHIFT_MAX then diffs[#diffs + 1] = d end
     end
   end
   if #diffs >= 2 then

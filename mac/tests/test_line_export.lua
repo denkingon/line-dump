@@ -102,11 +102,15 @@ local function visibleTexts(screen)
   local function add(s, x, y) t[#t + 1] = { s = s, x = x, y = y } end
   if not W.win.visible then return t end
   add(W.knobs.winTitle or "LINE", W.win.x + W.win.w / 2, W.win.y + 12)   -- 窓のタイトル
-  -- 検索欄の文字（実機では虫眼鏡のアイコンが字として前に付くことがある: searchPrefix）
-  if not W.knobs.searchUnread then
+  -- 検索欄の文字（実機では虫眼鏡のアイコンが字として前に付くことがある: searchPrefix）。
+  -- 実機の窓表示では、入れた文字が写らず「…を検索」の表示のままだった（searchShowsHint）
+  if W.knobs.searchShowsHint then
+    add("友だち、トーク、メッセージを検索", L.field.x + L.field.w / 2, L.field.y + L.field.h / 2)
+  elseif not W.knobs.searchUnread then
     add(W.search ~= "" and ((W.knobs.searchPrefix or "") .. W.search) or "検索",
       L.field.x + L.field.w / 2, L.field.y + L.field.h / 2)
   end
+  if W.knobs.magnifier then add("Q", L.field.x + 19, L.field.y + L.field.h / 2) end
   -- 一覧の列の中・検索欄と同じ高さにある物（検索欄の AX の枠より右。実機ではアイコン等）
   if W.knobs.listJunk then add(W.knobs.listJunk, L.field.x + 230, L.field.y + L.field.h / 2) end
   -- 検索中は検索欄の下に絞り込みのタブが並ぶ
@@ -875,7 +879,7 @@ end)
 
 test("フルスクリーン（LINE が AX で教える位置が画面より 30pt 下）でも、ヘッダを読んで ⋮ を押して保存する", function()
   for _, k in ipairs({ { axDY = 30, searchPrefix = "Q " }, { axDY = 30, focusIgnored = true },
-                       { axDY = 30, searchUnread = true }, { axDY = -20 }, { axDY = 0 } }) do
+                       { axDY = 30, searchUnread = true }, { axDY = -10 }, { axDY = 0 } }) do
     reset({ chats = chats({ "直承Jikisho", "Berry" }) })
     for kk, v in pairs(k) do W.knobs[kk] = v end
     W.knobs.paneTop = "裏フェス Urafess"           -- トーク欄の上端の別の文字（ヘッダと取り違えない）
@@ -887,6 +891,25 @@ test("フルスクリーン（LINE が AX で教える位置が画面より 30pt
       if math.abs(c.x - L.dots.x) < 5 and math.abs(c.y - L.dots.y) < 5 then hitDots = true end
     end
     check(hitDots, tag .. ": 画面の ⋮ の位置を押した")
+    safe()
+  end
+end)
+
+test("窓表示の実機: 検索欄に入れた文字が写らず、すぐ下の結果の行に同じ名前がある時、ずれを結果の行で測らない", function()
+  for _, k in ipairs({ { axDY = 0, searchShowsHint = true, magnifier = true },
+                       { axDY = 0, searchShowsHint = true },
+                       { axDY = 0, searchUnread = true, magnifier = true },
+                       { axDY = 30, searchShowsHint = true, magnifier = true },
+                       { axDY = 30, searchUnread = true, magnifier = true } }) do
+    -- Berry は普段の一覧に無く、検索して出てくる（検索欄のすぐ下の結果の行に名前が出る）
+    reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true } } })
+    for kk, v in pairs(k) do W.knobs[kk] = v end
+    local M = load(); W.logs = {}
+    local ok = M.check("Berry")
+    local out = table.concat(W.logs, "\n")
+    local tag = "axDY=" .. k.axDY .. (k.searchShowsHint and " 検索の表示" or " 読めない") .. (k.magnifier and " 虫眼鏡" or "")
+    check(ok, tag .. ": 確かめられた:\n" .. out)
+    check(not out:find("ずれ %+[1-9]"), tag .. ": 下へのずれと測っていない:\n" .. out)
     safe()
   end
 end)
