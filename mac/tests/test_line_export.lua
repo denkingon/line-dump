@@ -122,7 +122,8 @@ local function visibleTexts(screen)
   for i, c in ipairs(results()) do
     if L.rowY(i) < L.listTop then goto hidden end
     if not W.knobs.ocrDropRows then add(c.ocrRow or c.name, L.rowX, L.rowY(i)) end
-    add(c.preview or "最後のメッセージ", L.rowX, L.rowY(i) + 18)
+    -- 最後のメッセージ。実機では時刻の 20pt 下（名前の 11pt 下）のこともある: previewDY
+    add(c.preview or "最後のメッセージ", L.rowX, L.rowY(i) + (W.knobs.previewDY or 18))
     -- 行の右上に最後のメッセージの時刻（実機と同じく名前より少し上）
     if not W.knobs.noRowTimes then add(c.time or "12:34", L.field.x + 250, L.rowY(i) - 9) end
     ::hidden::
@@ -156,7 +157,8 @@ local function ocrOutput(cap)
   for _, it in ipairs(visibleTexts(cap.screen)) do
     if it.x >= cap.x and it.x <= cap.x + cap.w and it.y >= cap.y and it.y <= cap.y + cap.h then
       lines[#lines + 1] = string.format("%s\t%d\t%d\t%d\t%d", it.s,
-        math.floor((it.x - cap.x) * SCALE + 0.5), math.floor((it.y - cap.y) * SCALE + 0.5),
+        math.floor((it.x - cap.x) * SCALE + 0.5),
+        math.floor((it.y - cap.y) * SCALE + 0.5) + (W.knobs.ocrHalf and 1 or 0),   -- 0.5pt ずれた読み
         14 * utf8.len(it.s) * SCALE, 20 * SCALE)
     end
   end
@@ -305,7 +307,7 @@ local function sheetEl()
     end }),
     el({ AXRole = "AXButton", AXTitle = "キャンセル" }, { AXPress = function()
       if W.sheet.confirm or W.knobs.cancelIgnored then return end   -- 上書き確認が出ている間は効かない
-      W.sheet = nil; W.focus = nil; W.cancelled = true
+      W.sheet = nil; W.focus = nil; W.cancelled = true; W.scrollsAtCancel = W.scrollsAtCancel or W.scrolls or 0
     end }),
   }
   if s.confirm then
@@ -561,6 +563,11 @@ hs = {
     -- ホイール（正は上へ）。マウスが一覧の上にある時だけ一覧が動く
     scrollWheel = function(off, mods, unit)
       W.scrolls = (W.scrolls or 0) + 1
+      -- 本物は量を整数に直して読む（小数は 0 になり、動かない）
+      local amount = math.tointeger(off[2])
+      if not amount then W.fractionalScroll = true; return end
+      if W.sheet then return end                     -- シートが出ている間は一覧も動かない
+      off = { off[1], amount }
       if W.knobs.userActsAtScroll == W.scrolls then W.pendingUser = "key" end
       if not W.knobs.synthNoReset then W.lastHID = T end
       if W.knobs.frontIsOther then W.scrolledElsewhere = true; return end
@@ -1469,84 +1476,132 @@ end)
 
 -- ===================== 今のトーク名を集める =====================
 local function namesTxt() return readfile(DEBUG .. "/names.txt") or "" end
+local function withTargets(extra)
+  local M = load()
+  local list = {}
+  for _, c in ipairs(extra or {}) do list[#list + 1] = c end
+  W.chats = list
+  return M
+end
 
-test("書き出しの前に一覧を上から下まで読んで今のトーク名を集め、names.txt に名前だけを書く", function()
+test("1日1回、書き出しの前に一覧を上から下まで読んで今のトーク名を集め、names.txt に名前だけを書く", function()
+  reset()
   local list = {}
   for i = 1, 40 do list[#list + 1] = { name = "トーク" .. i .. "番", preview = "秘密のメッセージ" .. i } end
   list[#list + 1] = { name = "Berry", preview = "秘密のメッセージB" }
-  reset({ chats = list })
-  W.search = "前の検索"; W.listScroll = 0
-  local M = load(); W.logs = {}
-  M.check("Berry")
+  local M = withTargets(list)
+  W.search = "前の検索"
+  M._t.runExport()
   local nt = namesTxt()
   local all = true
   for i = 1, 40 do if not nt:find("\nトーク" .. i .. "番\n", 1, true) then all = false end end
   check(all and nt:find("\nBerry\n", 1, true), "41件とも集めた:\n" .. nt)
+  check(nt:find("一覧の終わりまで読んだ", 1, true), "終わりまで読んだと書く:\n" .. nt)
   check(not nt:find("秘密", 1, true), "最後のメッセージは書かない")
-  check(nt:find("Berry → Berry（同じ名前）", 1, true), "TARGETS → 今の名前:\n" .. nt)
+  check(nt:find("Berry → Berry（同じ名前）", 1, true), "TARGETS ごとの近い名前:\n" .. nt)
   check((W.scrolls or 0) >= 3 and (W.listScroll or 0) == 0, "スクロールして読み、一番上に戻した（" .. tostring(W.scrolls) .. " 回）")
-  check(W.saved == nil and W.cancelled, "check なので保存していない")
+  check(W.saved and W.saved:find("[LINE]Berry_", 1, true), "Berry は書き出した")
+  local scrolls = W.scrolls
+  M._t.runExport()
+  check(W.scrolls == scrolls, "同じ日の2回目は集め直さない")
   safe()
 end)
 
-test("名前が少し変わったトーク（今の名前に記号が足された）を、今の名前で探して書き出す", function()
-  reset({ chats = chats({ "直承Jikisho", "il 石川ありがとう!" }) })
-  local M = load(); W.logs = {}
-  local ok = M.one("il 石川ありがとう")
-  check(ok and W.saved and W.saved:find("[LINE]il 石川ありがとう!_", 1, true), "今の名前で保存: " .. tostring(W.saved))
+test("名前が似ているだけのトーク（Berry と Berry2）は書き出さず、names.txt に候補として書くだけ", function()
+  reset()
+  local M = withTargets({ { name = "直承Jikisho" }, { name = "Berry2" } })
+  M._t.runExport()
+  check(not W.saved, "Berry2 を書き出していない: " .. tostring(W.saved))
+  check(namesTxt():find("Berry → Berry2（0.92）", 1, true), "候補として書く:\n" .. namesTxt())
+  safe()
+end)
+
+test("名前が変わったトーク（il 石川ありがとう → il 石川ありがとう!）も自動では書き出さない（TARGETS を直す）", function()
+  reset()
+  local M = withTargets({ { name = "直承Jikisho" }, { name = "il 石川ありがとう!" } })
+  M._t.runExport()
+  check(not W.saved, "書き出していない")
+  check(namesTxt():find("il 石川ありがとう → il 石川ありがとう!（0.95）", 1, true), "候補:\n" .. namesTxt())
+  safe()
+end)
+
+test("名前の絵文字を OCR が別の字に読んだ行は、OCR で読んだ文字だと分かるように書く", function()
+  reset()
+  local M = withTargets({ { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } })
+  M._t.runExport()
+  check(namesTxt():find("パプリカ》\t（OCR で読んだ文字）", 1, true), "OCR の印:\n" .. namesTxt())
+  check(W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ は今までどおり書き出す: " .. tostring(W.saved))
+  safe()
+end)
+
+test("実機の行の並び（最後のメッセージが時刻の 20pt 下）でも、1字・絵文字だけの名前の行で最後のメッセージを名前として書かない", function()
+  reset({ knobs = { previewDY = 11 } })
+  local M = withTargets({ { name = "母", preview = "秘密のメッセージ1" }, { name = "🐱", preview = "秘密のメッセージ2" },
+                          { name = "Berry", preview = "秘密のメッセージ3" } })
+  M._t.runExport()
   local nt = namesTxt()
-  check(nt:find("il 石川ありがとう → il 石川ありがとう!（近さ", 1, true), "names.txt に結び付けを書く:\n" .. nt)
-  local out = table.concat(W.logs, "\n")
-  check(out:find("✓ 名前: 今の一覧では 〈il 石川ありがとう〉＋1字", 1, true), "結び付けた今の名前を出す:\n" .. out)
+  check(nt:find("\n母\n", 1, true) and nt:find("\nBerry\n", 1, true), "名前は集めた:\n" .. nt)
+  check(not nt:find("秘密", 1, true), "最後のメッセージは書かない:\n" .. nt)
   safe()
 end)
 
-test("名前の絵文字を OCR が別の字に読んでも、一覧の名前から結び付けて書き出す（AX に無い行）", function()
-  reset({ chats = { { name = "パプリカ定例会議" },
-                    { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } })
-  local M = load(); W.logs = {}
-  local ok = M.one("パプリカ")
-  check(ok and W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ を保存: " .. tostring(W.saved))
-  check(not table.concat(W.openLog, ","):find("定例", 1, true), "別のトークは開いていない: " .. table.concat(W.openLog, ","))
-  check(namesTxt():find("パプリカ》\t（OCR で読んだ文字）", 1, true), "OCR で読んだ名前だと分かるように書く:\n" .. namesTxt())
+test("ずれが 0.5pt でも、スクロールの量を整数で渡して一覧を最後まで読む", function()
+  reset({ knobs = { ocrHalf = true } })
+  local list = {}
+  for i = 1, 30 do list[#list + 1] = { name = "トーク" .. i .. "番" } end
+  local M = withTargets(list)
+  M._t.runExport()
+  check(not W.fractionalScroll, "小数の量を渡していない")
+  check(namesTxt():find("\nトーク30番\n", 1, true), "最後の行まで集めた:\n" .. namesTxt())
   safe()
 end)
 
-test("似ているだけの名前（村田研 と 村田研OB会）は結び付けず、names.txt に一番近い名前を書く", function()
-  reset({ chats = chats({ "直承Jikisho", "村田研OB会" }) })
-  local M = load(); W.logs = {}
-  local ok = M.one("村田研")
-  check(not ok and not W.saved, "書き出さない")
-  check(namesTxt():find("村田研 → 決められない（一番近い: 村田研OB会 0.75）", 1, true), "一番近い名前:\n" .. namesTxt())
+test("似ているだけの名前（村田研 と 村田研OB会）は、近さ付きの候補として書く", function()
+  reset()
+  local M = withTargets({ { name = "直承Jikisho" }, { name = "村田研OB会" } })
+  M._t.runExport()
+  check(not W.saved, "書き出さない")
+  check(namesTxt():find("村田研 → 村田研OB会（0.75）", 1, true), "候補:\n" .. namesTxt())
   safe()
 end)
 
-test("名前を集めている時に人が触ったら、全体を止めて何も開かない", function()
-  reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { userActsAtScroll = 2 } })
-  local M = load()
-  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+test("名前を集めている時に人が触ったら、全体を止めて何も開かず、理由を診断ファイルに書く", function()
+  reset({ knobs = { userActsAtScroll = 2 } })
+  local M = withTargets({ { name = "Berry" }, { name = "直承Jikisho" } })
   local r = M._t.runExport()
   check(r == "aborted", "中断: " .. tostring(r))
   check(#W.openLog == 0 and not W.saved, "何も開いていない")
-  check(heartbeat():find("中断", 1, true), "heartbeat に中断:\n" .. heartbeat())
+  check(heartbeat():find("今のトーク名を集めている時に中断", 1, true), "heartbeat に中断:\n" .. heartbeat())
+  local rep = readfile(DEBUG .. "/latest.txt") or ""
+  check(rep:find("今のトーク名を集める", 1, true) and rep:find("人の操作", 1, true), "診断ファイルに理由:\n" .. rep)
 end)
 
 test("検索欄にフォーカスが入らない時は、キーを送らずに AX で消してから名前を集める", function()
-  reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { focusIgnored = true, clickNoFocus = true } })
+  reset({ knobs = { focusIgnored = true, clickNoFocus = true } })
+  local M = withTargets({ { name = "Berry" }, { name = "直承Jikisho" } })
   W.search = "前の検索"
-  local M = load(); W.logs = {}
-  M.check("Berry")
+  M._t.runExport()
   check(W.draft == nil, "入力欄に何も打っていない・消していない: " .. tostring(W.draft))
   check(namesTxt():find("\nBerry\n", 1, true), "名前を集めた:\n" .. namesTxt())
   safe()
 end)
 
-test("フルスクリーン（AX が 30pt 下）でも名前を集めて書き出す", function()
-  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { axDY = 30 } })
+test("フルスクリーン（AX が 30pt 下）でも名前を集める", function()
+  reset({ knobs = { axDY = 30 } })
+  local M = withTargets({ { name = "直承Jikisho" }, { name = "Berry" } })
   W.search = "前の検索"
-  local M = load(); W.logs = {}
-  local ok = M.one("Berry")
-  check(ok and W.saved and namesTxt():find("\nBerry\n", 1, true), "集めて書き出した:\n" .. namesTxt())
+  M._t.runExport()
+  check(namesTxt():find("\nBerry\n", 1, true) and W.saved, "集めて書き出した:\n" .. namesTxt())
+  safe()
+end)
+
+test("前の件の保存ダイアログが残っていたら、閉じてから名前を集める", function()
+  reset()
+  local M = withTargets({ { name = "Berry" }, { name = "直承Jikisho" } })
+  W.open = "直承Jikisho"; W.sheet = { value = "[LINE]直承Jikisho.txt" }; W.focus = "sheet"
+  M._t.runExport()
+  check(W.cancelled and W.scrollsAtCancel == 0, "スクロールより先に閉じた: " .. tostring(W.scrollsAtCancel))
+  check(namesTxt():find("\nBerry\n", 1, true), "集めた:\n" .. namesTxt())
   safe()
 end)
 
