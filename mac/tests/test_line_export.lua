@@ -33,7 +33,7 @@ local DEBUG = ROOT .. "/line-dump-debug"          -- 撮影画像と診断の置
 local W
 local SCALE = 2
 local SCREEN = { x = 0, y = 25, w = 1440, h = 875 }
-local LINE_PID, OTHER_PID = 4242, 999
+local LINE_PID, OTHER_PID, HS_PID = 4242, 999, 777
 local T = 1000000                     -- 偽の時計（usleep で進む）
 
 local function reset(opts)
@@ -137,7 +137,7 @@ local function visibleTexts(screen)
     -- 最後のメッセージ。実機では時刻の 20pt 下（名前の 11pt 下）のこともある: previewDY
     add(c.preview or "最後のメッセージ", L.rowX, L.rowY(i) + (W.knobs.previewDY or 18))
     -- 行の右上に最後のメッセージの時刻（実機と同じく名前より少し上）
-    if not W.knobs.noRowTimes then add(c.time or "12:34", L.field.x + 250, L.rowY(i) - 9) end
+    if not W.knobs.noRowTimes then add(c.time or "12:34", L.field.x + (W.knobs.timeDX or 250), L.rowY(i) - 9) end
     ::hidden::
   end
   if W.open then
@@ -206,11 +206,15 @@ local function opened(c)
   return W.knobs.wrongChatOnClick or c.name
 end
 
--- 押した所に重なっている物（通知バナーなど）
+-- 押した所に重なっている物（通知バナーなど）。untilT を過ぎたら消える（バナー）。
+-- console = true は Hammerspoon のコンソール: 「常に手前」の間（または covers の時）だけ
+-- LINE に重なり、最小化すると重ならない
 local function overlayAt(pt)
   for _, o in ipairs(W.overlays or {}) do
     local x, y = W.win.x + o.dx, W.win.y + o.dy
-    if pt.x >= x and pt.x <= x + o.w and pt.y >= y and pt.y <= y + o.h then return o end
+    local active = not (o.untilT and T >= o.untilT)
+    if o.console then active = active and not W.consoleMinimized and (W.consoleOnTop or o.covers) end
+    if active and pt.x >= x and pt.x <= x + o.w and pt.y >= y and pt.y <= y + o.h then return o end
   end
 end
 
@@ -625,6 +629,14 @@ hs = {
   screen = { primaryScreen = function() return screenObj end },
   screenRecordingState = function() return not W.knobs.noPermission end,
   openConsole = function() W.consoleOpened = true end,
+  processInfo = { processID = HS_PID },
+  -- コンソールの「常に手前」（Hammerspoon の設定）と、コンソールの窓
+  consoleOnTop = function(v) if v ~= nil then W.consoleOnTop = v end; return W.consoleOnTop == true end,
+  console = { hswindow = function()
+    return { isMinimized = function() return W.consoleMinimized == true end,
+             minimize = function() W.consoleMinimized = true; W.consoleMinimizedN = (W.consoleMinimizedN or 0) + 1 end,
+             unminimize = function() W.consoleMinimized = false end }
+  end },
   reload = function() W.reloaded = true end,
   application = {
     find = function() return W.running and appObj or nil end,
@@ -634,7 +646,13 @@ hs = {
     end,
     applicationForPID = function(pid)
       local names = W.knobs.pidNames or {}
-      if names[pid] then return { name = function() return names[pid] end } end
+      if pid == HS_PID then
+        return { name = function() return "Hammerspoon" end, bundleID = function() return "org.hammerspoon.Hammerspoon" end }
+      end
+      if W.knobs.helperPid and pid == W.knobs.helperPid then   -- LINE の補助プロセス
+        return { name = function() return "LINE Helper" end, bundleID = function() return "jp.naver.line.mac.helper" end }
+      end
+      if names[pid] then return { name = function() return names[pid] end, bundleID = function() return "com.example" end } end
     end,
   },
   axuielement = {
@@ -654,8 +672,9 @@ hs = {
       end })
     end,
     systemElementAtPosition = function(x, y)
-      if overlayAt({ x = x, y = y }) then return el({ pid = OTHER_PID }) end
-      return el({ pid = LINE_PID })
+      local o = overlayAt({ x = x, y = y })
+      if o then return el({ pid = o.pid or (o.console and HS_PID) or OTHER_PID }) end
+      return el({ pid = W.knobs.helperPid or LINE_PID })
     end,
     systemWideElement = function()
       return el({ AXFocusedApplication = function()
@@ -1547,6 +1566,51 @@ test("押す所に通知などが重なっていたら押さずに止める", fu
   safe()
 end)
 
+test("Hammerspoon のコンソールが「常に手前」で ⋮ に重なっていても、実行中だけ外して押し、終わったら戻す", function()
+  reset({ chats = chats({ "Berry" }) })
+  W.consoleOnTop = true
+  W.overlays = { { console = true, dx = SCREEN.w - 180, dy = 40, w = 180, h = 800 } }   -- 実機: 右側に縦長
+  local ok, e = exportOne("Berry")
+  check(ok and W.saved, "⋮ を押して保存した: " .. tostring(e and e.msg))
+  check(not W.clickedOverlay, "コンソールを押していない")
+  check(W.consoleOnTop == true, "終わったら「常に手前」に戻した")
+  check(not W.consoleMinimizedN, "「常に手前」を外すだけで足り、最小化はしていない")
+  safe()
+end)
+
+test("「常に手前」でなくてもコンソールが重なっていれば、最小化して押し、終わったら戻す", function()
+  reset({ chats = chats({ "Berry" }) })
+  W.overlays = { { console = true, covers = true, dx = SCREEN.w - 180, dy = 40, w = 180, h = 800 } }
+  local ok, e = exportOne("Berry")
+  check(ok and W.saved, "保存した: " .. tostring(e and e.msg))
+  check(W.consoleMinimizedN == 1 and not W.consoleMinimized, "最小化して、終わったら戻した")
+  safe()
+end)
+
+test("通知のバナーが重なっていたら、消えるまで待って押す", function()
+  reset({ chats = chats({ "Berry" }) })
+  W.overlays = { { dx = SCREEN.w - 360, dy = 20, w = 360, h = 90, untilT = T + 4 } }
+  local ok, e = exportOne("Berry")
+  check(ok and W.saved, "待ってから押して保存した: " .. tostring(e and e.msg))
+  check(not W.clickedOverlay, "バナーを押していない")
+  safe()
+end)
+
+test("消えない物が重なっていたら押さずに止め、何が重なっていたかを書く", function()
+  reset({ chats = chats({ "Berry" }), knobs = { pidNames = { [OTHER_PID] = "Dropbox" } } })
+  W.overlays = { { dx = SCREEN.w - 360, dy = 20, w = 360, h = 90 } }
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "クリック" and e.msg:find("（Dropbox）", 1, true), "名前を書いて止めた: " .. tostring(e and e.msg))
+  check(not W.clickedOverlay, "押していない")
+end)
+
+test("LINE の補助プロセスの部品は、LINE 以外の物とみなさない", function()
+  reset({ chats = chats({ "Berry" }), knobs = { helperPid = 4300 } })
+  local ok, e = exportOne("Berry")
+  check(ok and W.saved, "保存した: " .. tostring(e and e.msg))
+  safe()
+end)
+
 test("LINE が前面に来なければ、何も打ち込まずに止める", function()
   reset({ chats = chats({ "Berry" }), knobs = { frontIsOther = true } })
   local ok, e = exportOne("Berry")
@@ -1642,6 +1706,16 @@ test("名前が変わったトーク（il 石川ありがとう → il 石川あ
   M._t.runExport()
   check(not W.saved, "書き出していない")
   check(namesTxt():find("il 石川ありがとう → il 石川ありがとう!（0.95）", 1, true), "候補:\n" .. namesTxt())
+  safe()
+end)
+
+test("一覧の境目を検索欄の右端で代えた時も、その右に出る時刻を目印に名前を集める（実機: 4 件しか集められなかった）", function()
+  reset({ knobs = { timeDX = 285 } })            -- 境目（検索欄の右端+10 = +270）より右の時刻
+  local list = {}
+  for i = 1, 20 do list[#list + 1] = { name = "トーク" .. i .. "番", noAX = true } end
+  local M = withTargets(list)
+  M._t.runExport()
+  check(namesTxt():find("\nトーク20番\t", 1, true) and namesTxt():find("# 20 件", 1, true), "20 件とも集めた:\n" .. namesTxt())
   safe()
 end)
 

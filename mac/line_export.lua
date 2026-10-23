@@ -221,13 +221,35 @@ local function lineFront(app)
   return ok and v == true
 end
 
--- その位置の一番上にあるのが LINE か（通知バナーや他の窓が重なっていないか）
-local function hitsLine(x, y)
-  if not (RUN and RUN.pid) then return true end
+-- その位置の一番上にある LINE 以外の物（通知バナーや他の窓）。無ければ nil。
+-- LINE の補助プロセス（バンドル ID が LINE と同じ始まり）は LINE とみなす。
+-- 戻り値: { name = アプリ名, own = Hammerspoon 自身の窓（コンソール）か }
+local function coverAt(x, y)
+  if not (RUN and RUN.pid) then return nil end
   local ok, el = pcall(hs.axuielement.systemElementAtPosition, x, y)
-  if not ok or not el then return true end      -- 判定できない時は前面確認に任せる
+  if not ok or not el then return nil end       -- 判定できない時は前面確認に任せる
   local ok2, pid = pcall(function() return el:pid() end)
-  return not ok2 or pid == nil or pid == RUN.pid
+  if not ok2 or pid == nil or pid == RUN.pid then return nil end
+  local okA, app = pcall(hs.application.applicationForPID, pid)
+  if not okA then app = nil end
+  local okB, bid = pcall(function() return app and app:bundleID() end)
+  bid = okB and bid or ""
+  if bid ~= "" and bid:sub(1, #LINE_BUNDLE) == LINE_BUNDLE then return nil end
+  local okN, name = pcall(function() return app and app:name() end)
+  return { name = (okN and name) or ("pid " .. tostring(pid)),
+           own = hs.processInfo ~= nil and pid == hs.processInfo.processID }
+end
+
+-- Hammerspoon のコンソールを実行中だけ隠す（「常に手前」にしてあると LINE の右側に
+-- 重なり、⋮ を押せなかった。実機 10/23 23:47）。終わったら endRun で戻す
+local function hideConsole()
+  local ok, w = pcall(function() return hs.console.hswindow() end)
+  if not (ok and w) then return false end
+  local okm, mini = pcall(function() return w:isMinimized() end)
+  if okm and mini then return false end
+  pcall(function() w:minimize() end); wait(0.5)
+  if RUN then RUN.hidConsole = w end
+  return true
 end
 
 -- 今キー入力を受けるアプリの名前（ログ用）。AX に尋ねるので処理の途中でも今の値
@@ -258,10 +280,24 @@ end
 
 local FRONT_LOST = "LINE が前面に来ない（前に出し直しても別のアプリが前にある）"
 
+-- 押す所に LINE 以外の物が重なっていないか確かめる。Hammerspoon 自身のコンソールなら
+-- 隠し、通知のバナーなら消えるまで 8 秒まで待つ。それでも重なっていれば押さない
+local function clearCover(x, y)
+  local cover = coverAt(x, y)
+  if cover and cover.own and hideConsole() then cover = coverAt(x, y) end
+  local limit = now() + 8
+  while cover and now() < limit do
+    wait(0.5); guard()
+    if not ensureFront() then blocked(FRONT_LOST) end
+    cover = coverAt(x, y)
+  end
+  if cover then blocked("押す所に LINE 以外の物が重なっている（" .. cover.name .. "）") end
+end
+
 local function clickAt(x, y)
   guard()
   if not ensureFront() then blocked(FRONT_LOST) end
-  if not hitsLine(x, y) then blocked("押す所に LINE 以外の物が重なっている") end
+  clearCover(x, y)
   hs.eventtap.leftClick(hs.geometry.point(x, y))
   synthesized(); wait(0.3)
 end
@@ -1160,7 +1196,9 @@ end
 local function rowNames(items, ff, paneX)
   local col, times = {}, {}
   for _, it in ipairs(items) do
-    if it.y > ff.y + ff.h + 2 and it.x < paneX then
+    -- 時刻は一覧の右端にあり、境目を検索欄の右端で代えた時はそれより右に出る
+    -- （実機: 境目 x=338 に対して時刻 x=344。4 件しか集められなかった）
+    if it.y > ff.y + ff.h + 2 and it.x < paneX + 40 then
       if it.x > paneX - 70 then
         if timeLike(it.text) then times[#times + 1] = it end
       elseif it.x > ff.x + 20 and it.n ~= "" then col[#col + 1] = it end
@@ -1187,7 +1225,7 @@ end
 local function scrollList(x, y, amount)
   guard()
   if not ensureFront() then blocked(FRONT_LOST) end
-  if not hitsLine(x, y) then blocked("押す所に LINE 以外の物が重なっている") end
+  clearCover(x, y)
   hs.mouse.absolutePosition(hs.geometry.point(x, y))
   hs.eventtap.scrollWheel({ 0, math.floor(amount + 0.5) }, {}, "pixel")
   synthesized(); wait(0.6)
@@ -1829,13 +1867,22 @@ local function beginRun(app, auto)
   RUN = { deadline = now() + RUN_LIMIT_MIN * 60, lastSynth = now(),
           mouse = hs.mouse.absolutePosition(), pid = app:pid(), app = app,
           displayIdle = okd and keep == true }
+  -- コンソールを「常に手前」にしていると LINE に重なるので、実行中だけ外す
+  local okt, onTop = pcall(function() return hs.consoleOnTop() end)
+  if okt and onTop == true then
+    RUN.consoleOnTop = true
+    pcall(function() hs.consoleOnTop(false) end)
+  end
   pcall(function() hs.caffeinate.set("displayIdle", true) end)
   pcall(function() hs.axuielement.systemWideElement():setTimeout(2) end)
   return true
 end
 local function endRun()
   local keep = RUN and RUN.displayIdle
+  local onTop, hid = RUN and RUN.consoleOnTop, RUN and RUN.hidConsole
   RUN = nil
+  if onTop then pcall(function() hs.consoleOnTop(true) end) end
+  if hid then pcall(function() hid:unminimize() end) end
   pcall(function() hs.caffeinate.set("displayIdle", keep == true) end)
   pcall(function() hs.axuielement.systemWideElement():setTimeout(AX_TIMEOUT_AFTER) end)
 end
