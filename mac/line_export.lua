@@ -1,14 +1,15 @@
 -- =====================================================================
--- LINE 自動エクスポート v4 → line-dump リポジトリへ push（Hammerspoon）
+-- LINE 自動エクスポート v4.1 → line-dump リポジトリへ push（Hammerspoon）
 --
 --   毎日 RUN_AT 以降の離席中に、TARGETS のトークを Mac 版 LINE から
 --   書き出し、mac/sync.sh を呼んでリポジトリに取り込み・push する。
 --
---   v4 は固定座標をやめ、画面を撮って OCR で文字を読み、見つけた所を押す。
+--   固定座標は使わず、画面を撮って OCR で文字を読み、見つけた所を押す。
 --   各段で画面を読み直して確かめてから次へ進み、違えばその段で止める。
 --     1. 窓      LINE のメイン窓を前面に。窓が無ければ open -b（Escape は使わない）
---     2. トーク  検索欄に名前 → 左ペインを OCR → 一致する行を押す
---                → ヘッダを OCR してトーク名を確認
+--     2. トーク  左の一覧に名前がそのまま見えていればその行を押す。見えなければ
+--                検索欄に名前を入れ、出てきた行を押す
+--                → ヘッダ（検索欄と同じ高さ）を OCR してトーク名を確認
 --     3. メニュー ⋮（窓右端−24, ヘッダのトーク名と同じ高さ）を押す
 --                → OCR で「トークを保存」を探して押す（型指定・較正は不要）
 --     4. 保存    保存シートを AX で待つ → →キー＋「_YYYYMMDD」→ 保存 →（置き換え）
@@ -20,8 +21,18 @@
 --   OCR は mac/ocr.applescript（macOS 標準の Vision）。Hammerspoon に
 --   「画面収録」の許可が要る（docs/setup-mac-auto.md）。
 --
---   手動実行: ⌘⌥⌃L / OCR 診断: ⌘⌥⌃K / トーク名一覧: ⌘⌥⌃J（⇧ 版でも可）
---   1件だけ試す: コンソールで __LINE_EXPORT.one("トーク名")
+--   使い方（Hammerspoon のコンソールに打つ。結果もコンソールに出る）:
+--     __LINE_EXPORT.help()          この一覧
+--     __LINE_EXPORT.status()        今の状態と、自動実行が走らない理由
+--     __LINE_EXPORT.check("Berry")  1件を保存ダイアログで保存名を確かめるところまで試す（保存しない）
+--     __LINE_EXPORT.one("Berry")    1件だけ本当に書き出して push
+--     __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）
+--     __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）
+--     __LINE_EXPORT.update()        最新の版にする（git pull して、うまくいった時だけ読み込み直す）
+--   ホットキー: 全件を今すぐ ⌘⌥⌃L / 診断 ⌘⌥⌃K / トーク名一覧 ⌘⌥⌃J（⇧ 版でも可）
+--   status / check / one / diag の出力の画面の文字は伏せ字にする（TARGETS の名前と
+--   LINE の決まった表示以外は「■n字」）。そのまま貼って共有しても会話の中身は出ない
+--   （names はトーク名の一覧を出す。会話の中身は出さない）。
 --   止めたいとき: マウスを動かすかキーを押す
 -- =====================================================================
 local M = {}
@@ -34,11 +45,12 @@ local OUT_DIR = os.getenv("LINE_DUMP_RAW_DIR") or (HOME ..
 
 -- 書き出す対象（トーク名だけ。v3 までの "full"/"official" の型指定は不要）。
 --
--- 検索欄に入れて絞り込み、画面に出た名前と照合してから開く。照合は
--- 絵文字・空白・グループのメンバー数を無視する。完全に一致する行があれば
--- それを開き、ヘッダと保存名も完全一致を求める。完全一致が無い時だけ
--- 部分一致を使うが、候補が2つ以上あれば決めずに止める（別トークを
--- 書き出さないため）。名前は LINE の表示どおりに書くのが確実（⌘⌥⇧J で一覧）。
+-- 一覧に名前がそのまま見えていればその行を、見えなければ検索欄に入れて
+-- 絞り込んだ行を、画面に出た名前と照合してから開く。照合は絵文字・空白・
+-- グループのメンバー数を無視する。一覧からは完全一致の行だけを開く。検索では
+-- 完全一致の行があればそれを開き、無い時だけ部分一致を使うが、候補が2つ以上
+-- あれば決めずに止める。開いたらヘッダで確かめ、保存名は完全一致を求める
+-- （別トークを書き出さないため）。名前は LINE の表示どおりに書くのが確実（⌘⌥⌃J で一覧）。
 local TARGETS = {
   "オーチュー/小林央忠",
   "3日後 ハートランド",
@@ -57,8 +69,8 @@ local TARGETS = {
 
 local RUN_AT = "07:00"
 
--- ▼ 画面の読み方（論理座標 pt）。左ペインとトーク欄の境目は毎回
---   検索欄の位置から割り出すので、窓の大きさが変わっても測り直しは要らない。
+-- ▼ 画面の読み方（論理座標 pt）。左の一覧とトーク欄の境目は毎回
+--   一覧の AX のセルから割り出すので、窓の大きさが変わっても測り直しは要らない。
 local L = {
   MENU_FROM_RIGHT = 24,   -- ⋮ は窓右端から 24pt 左・ヘッダのトーク名と同じ高さ
   -- ⋮ でメニューが出なかった時の再試行（1回だけ）。左へ大きくずらすと
@@ -66,6 +78,7 @@ local L = {
   MENU_RETRY_DX   = -6,
   MENU_RETRY_DY   = 6,
   HEADER_H        = 130,  -- 窓の上端からこの高さまでをヘッダとみなす
+  HEADER_DY       = 16,   -- ヘッダのトーク名は検索欄と同じ高さ（±この幅）にある
   MENU_W          = 360,  -- ⋮ から左へこの幅・下へ MENU_H をメニューの範囲とみなす
   MENU_H          = 520,
 }
@@ -74,9 +87,11 @@ local L = {
 -- ===================== 実装 ==========================================
 local LINE_BUNDLE = "jp.naver.line.mac"
 local OCR_SCRIPT  = REPO .. "/mac/ocr.applescript"
--- 失敗時の撮影画像はリポジトリの外に置く（トーク画面が写るので push しない）
-local DEBUG_DIR   = HOME .. "/Library/Logs/line-dump/debug"
-local DEBUG_SHOW  = "~/Library/Logs/line-dump/debug"   -- heartbeat に書く形（ユーザー名を出さない）
+-- 撮影画像と診断（伏せ字）は Dropbox の Backups/line-dump-debug に置く（非公開。
+-- トーク画面が写るので公開リポジトリには入れない）。失敗をこちらで見て直すための置き場。
+local DEBUG_DIR   = os.getenv("LINE_DUMP_DEBUG_DIR") or
+                    ((OUT_DIR:match("^(.*)/[^/]+$") or HOME) .. "/line-dump-debug")
+local DEBUG_SHOW  = "Dropbox の " .. (DEBUG_DIR:match("([^/]+/[^/]+)$") or "line-dump-debug")   -- heartbeat に書く形
 local DEBUG_KEEP_DAYS = 7
 local RUN_LIMIT_MIN   = 20    -- 1回の実行の上限（固まっても Hammerspoon を返す）
 -- 実行中は AX の応答待ちを2秒にし、終わったらこの値に戻す（0 = macOS の既定）。
@@ -90,6 +105,29 @@ local MENU_HINTS  = { "通知オフ", "通知オン", "トーク履歴を削除"
                       "Delete chat history", "Leave", "Block", "Hide" }
 
 local function log(s) print(os.date("%H:%M:%S ") .. "[line-dump] " .. s) end
+
+-- 使う拡張は読み込み時に読んでおく（Hammerspoon は初めて触った時に読み込むので、
+-- 実行の途中で読み込みに時間を取られないように）
+for _, ext in ipairs({ "axuielement", "eventtap", "pasteboard", "application", "screen", "mouse",
+                       "geometry", "caffeinate", "camera", "host", "fs", "timer", "alert" }) do
+  local _ = hs[ext]
+end
+
+-- このファイル自身と版。版は中身から作るので、直した版が入ると変わる
+-- （heartbeat と診断ファイルに書く。新しい版が入った日は失敗分をやり直す）
+local SELF = ((debug.getinfo(1, "S") or {}).source or ""):match("^@(.+)$") or (REPO .. "/mac/line_export.lua")
+local function readAll(p)
+  local f = io.open(p, "rb"); if not f then return nil end
+  local s = f:read("a"); f:close(); return s
+end
+local LOADED_SRC = readAll(SELF) or ""
+local function checksum(s)
+  local h = 0
+  for i = 1, #s do h = (h * 31 + s:byte(i)) % 4294967296 end
+  return string.format("%08x", h)
+end
+local VERSION   = "v4.1-" .. checksum(LOADED_SRC)
+local LOADED_AT = os.date("%Y-%m-%d %H:%M")
 local function now() return hs.timer.secondsSinceEpoch() end
 local function wait(sec) hs.timer.usleep(math.floor(sec * 1000000)) end
 local function sh(s)                              -- シェル用の引用
@@ -133,10 +171,18 @@ local function guard()
   local t = now()
   if t > RUN.deadline then stop("時間切れ（" .. RUN_LIMIT_MIN .. "分）") end
   local idle, fine = idleSeconds()
-  if idle + (fine and 0.25 or 1.33) < t - RUN.lastSynth then stop("人の操作を検知") end
+  local since = t - RUN.lastSynth
+  if idle + (fine and 0.25 or 1.33) < since then
+    -- 止めた理由を数字で残す（人が触っていないのに止まる時の手がかり）
+    log(string.format("見張り: 最後の自動操作から %.2f 秒なのに、無操作時間が %.2f 秒（%s）",
+      since, idle, fine and "ioreg" or "idleTime"))
+    stop("人の操作を検知")
+  end
   if RUN.mouse then
     local p = hs.mouse.absolutePosition()
-    if math.abs(p.x - RUN.mouse.x) > 3 or math.abs(p.y - RUN.mouse.y) > 3 then
+    local dx, dy = p.x - RUN.mouse.x, p.y - RUN.mouse.y
+    if math.abs(dx) > 3 or math.abs(dy) > 3 then
+      log(string.format("見張り: 自動操作の後にマウスが (%.0f, %.0f) 動いた", dx, dy))
       stop("マウスが動いた")
     end
   end
@@ -166,16 +212,44 @@ local function hitsLine(x, y)
   return not ok2 or pid == nil or pid == RUN.pid
 end
 
+-- 今キー入力を受けるアプリの名前（ログ用）。AX に尋ねるので処理の途中でも今の値
+local function frontAppName()
+  local ok, n = pcall(function()
+    local a = hs.axuielement.systemWideElement():attributeValue("AXFocusedApplication")
+    return a and a:attributeValue("AXTitle")
+  end)
+  return ok and n and tostring(n) or "不明"
+end
+
+-- LINE が前面か確かめ、違えば1回だけ前に出し直す（通知などで一瞬前面が
+-- 外れることがある）。それでも違えば押さない・打たない。
+local function ensureFront()
+  if lineFront() then return true end
+  local other = frontAppName()
+  if RUN and RUN.app then
+    pcall(function() RUN.app:activate(true) end); wait(0.6)
+    guard()                                       -- 待っている間の人の操作を見逃さない
+    if lineFront() then
+      log("warn: LINE が前面に無かった（前面: " .. other .. "）ので前に出し直した")
+      return true
+    end
+  end
+  log("LINE が前面に来ない（前面: " .. other .. "）")
+  return false
+end
+
+local FRONT_LOST = "LINE が前面に来ない（前に出し直しても別のアプリが前にある）"
+
 local function clickAt(x, y)
   guard()
-  if not lineFront() then blocked("LINE が前面に無い") end
+  if not ensureFront() then blocked(FRONT_LOST) end
   if not hitsLine(x, y) then blocked("押す所に LINE 以外の物が重なっている") end
   hs.eventtap.leftClick(hs.geometry.point(x, y))
   synthesized(); wait(0.3)
 end
 local function key(mods, k)
   guard()
-  if not lineFront() then blocked("LINE が前面に無い") end
+  if not ensureFront() then blocked(FRONT_LOST) end
   hs.eventtap.keyStroke(mods, k)
   synthesized()
 end
@@ -217,16 +291,26 @@ local function norm(s)
   return (s:gsub("%s+", ""))                       -- 壊れた UTF-8 は空白だけ落とす
 end
 
--- 末尾のグループのメンバー数「（82）」を除く（OCR が閉じ括弧を落とす・
--- 「]」に読むことがあるので、それも許す）
-local function countless(n) return (n:gsub("%(%d+[%)%]]?$", "")) end
+-- 末尾のグループのメンバー数「（82）」を除く。OCR が閉じ括弧を落とす・「]」に
+-- 読むことがあり、ヘッダではメンバー数の後ろのアイコンを字として読むことも
+-- ある（実機:「（82）→ ビ」）ので、メンバー数の後ろの3字までは一緒に落とす。
+local function countless(n)
+  local from, last, stop_ = 1, nil, nil
+  while true do
+    local a, b = n:find("%(%d+[%)%]]?", from)
+    if not a then break end
+    last, stop_, from = a, b, b + 1
+  end
+  if last and (utf8.len(n:sub(stop_ + 1)) or 99) <= 3 then return n:sub(1, last - 1) end
+  return n
+end
 
 -- 照合の強さ: 3=完全一致 2=前方一致 1=部分一致 0=不一致。
 -- グループのメンバー数は無視し、「…」で切れた名前は前半で照合する。
 local function score(tn, s)
   if tn == "" or s == "" then return 0 end
   local core = countless(s)
-  if core == tn then return 3 end
+  if core == tn or s == tn then return 3 end
   if core:sub(1, #tn) == tn then return 2 end
   if s:find(tn, 1, true) then return 1 end
   local cut = core:match("^(.-)%.%.%.$") or core:match("^(.-)…$")
@@ -235,7 +319,27 @@ local function score(tn, s)
 end
 
 -- 保存名とトーク名の照合用。ファイル名では / が _ や : に化けるので記号も落とす。
-local function loose(s) return (norm(s):gsub("%p", "")) end
+-- 保存名とトーク名の照合用。名前欄の値は OCR でなく LINE が付けた正確な文字
+-- なので、norm() の OCR 向けの読み替え（ー・一・ダッシュ → -、卜 → ト）も記号の
+-- 削除もしない（「村田研一」「村田研ー」「(Berry)」を「村田研」「Berry」と別に扱う）。
+-- 落とすのは空白・絵文字だけ。全角英数は半角・小文字にそろえ、ファイル名で化ける
+-- / : _ だけを同じ字とみなす。
+local function loose(s)
+  local ok, r = pcall(function()
+    local out = {}
+    for _, c in utf8.codes(tostring(s or "")) do
+      if not skipped(c) then
+        if c >= 0xFF01 and c <= 0xFF5E then c = c - 0xFEE0 end   -- 全角→半角
+        if c >= 0x41 and c <= 0x5A then c = c + 32 end           -- A-Z → a-z
+        if c == 0x2F or c == 0x3A then c = 0x5F end              -- / : → _
+        out[#out + 1] = utf8.char(c)
+      end
+    end
+    return table.concat(out)
+  end)
+  if ok then return r end
+  return (tostring(s or ""):gsub("%s+", ""))
+end
 
 local function isLabel(n, labels)
   for _, lab in ipairs(labels) do
@@ -246,6 +350,43 @@ local function isLabel(n, labels)
   return false
 end
 local function isSaveLabel(n) return isLabel(n, SAVE_LABELS) end
+
+local function targetName(t) return type(t) == "table" and t[1] or t end
+
+-- ---------- 伏せ字 ----------
+-- コンソール・ログ・診断ファイルに出す画面の文字は伏せ字にする（貼って共有
+-- しても、会話の中身や他のトーク名が出ないように）。そのまま
+-- 出すのは TARGETS の名前と LINE の決まった表示（メニュー項目など）だけ。
+-- それ以外は「■n字」。数字だけのもの（時刻など）は「［数字］」。
+local UI_WORDS = { "LINE", "検索", "トーク", "友だち", "ホーム", "通話", "すべて",
+                   "グループ", "メッセージ", "公式アカウント", "オープンチャット",
+                   "Search", "Chats", "Friends", "Messages", "Groups", "All" }
+local function masked(s)
+  s = tostring(s or "")
+  local n = norm(s)
+  if n == "" then return "（空）" end
+  for _, t in ipairs(TARGETS) do
+    local name = targetName(t)
+    local tn = norm(name)
+    local sc = score(tn, n)
+    if sc == 3 then return "〈" .. name .. "〉" end
+    -- 前方一致は、後ろの字数だけ出す（「かにっこにー3」→〈かにっこにー〉＋1字）
+    local extra = (utf8.len(n) or 99) - (utf8.len(tn) or 0)
+    if sc == 2 and extra <= 6 then return "〈" .. name .. "〉＋" .. extra .. "字" end
+  end
+  -- 決まった表示は、読めた文字ではなく決まった文言で出す（後ろに付いた字は字数だけ）
+  for _, labs in ipairs({ SAVE_LABELS, MENU_HINTS, UI_WORDS }) do
+    for _, lab in ipairs(labs) do
+      local ln = norm(lab)
+      if n == ln then return lab end
+      if labs ~= UI_WORDS and isLabel(n, { lab }) then
+        return lab .. "＋" .. ((utf8.len(n) or 0) - (utf8.len(ln) or 0)) .. "字"
+      end
+    end
+  end
+  if s:match("^[%d%p%s]+$") then return "［数字］" end
+  return "■" .. (utf8.len(s) or #s) .. "字"
+end
 
 -- ---------- 撮影と OCR ----------
 local function pngSize(path)
@@ -322,38 +463,93 @@ end
 -- ---------- デバッグ画像 ----------
 local function safeName(s) return (tostring(s):gsub("[/:%c\\]", "_")) end
 
+-- 撮影を DEBUG_DIR に残す。戻り値は heartbeat に書く形と、実際のパス。
+-- Retina の PNG は数 MB あるので、sips で縮めた JPEG にする（できなければ PNG のまま）。
 local function keepDebug(name, stage, cap, win)
-  if not cap then cap = capture(win, "fail", screenOf(win)) end
+  -- 撮影が無ければ LINE の窓だけを撮る（前面の他のアプリや通知は写さない。窓が無ければ撮らない）
+  if not cap then cap = capture(win, "fail") end
   if not cap then return nil end
-  hs.fs.mkdir(HOME .. "/Library/Logs/line-dump"); hs.fs.mkdir(DEBUG_DIR)
-  local file = os.date("%Y%m%d-%H%M%S") .. "_" .. safeName(name) .. "_" .. safeName(stage) .. ".png"
-  local src, dst = io.open(cap.path, "rb"), io.open(DEBUG_DIR .. "/" .. file, "wb")
+  hs.fs.mkdir(DEBUG_DIR)
+  local base = os.date("%Y%m%d-%H%M%S") .. "_" .. safeName(name) .. "_" .. safeName(stage)
+  local jpg = DEBUG_DIR .. "/" .. base .. ".jpg"
+  hs.execute("/usr/bin/sips -s format jpeg -s formatOptions 70 -Z 2000 " .. sh(cap.path) ..
+             " --out " .. sh(jpg) .. " >/dev/null 2>&1")
+  if (hs.fs.attributes(jpg, "size") or 0) > 0 then return DEBUG_SHOW .. "/" .. base .. ".jpg", jpg end
+  local png = DEBUG_DIR .. "/" .. base .. ".png"
+  local src, dst = io.open(cap.path, "rb"), io.open(png, "wb")
   if not (src and dst) then
     if src then src:close() end
     if dst then dst:close() end
     return nil
   end
   dst:write(src:read("a")); src:close(); dst:close()
-  return DEBUG_SHOW .. "/" .. file
+  return DEBUG_SHOW .. "/" .. base .. ".png", png
 end
 
 local function pruneDebug()
   if hs.fs.attributes(DEBUG_DIR, "mode") ~= "directory" then return end
   local limit = os.time() - DEBUG_KEEP_DAYS * 86400
-  for f in hs.fs.dir(DEBUG_DIR) do
-    local p = DEBUG_DIR .. "/" .. f
-    if f:match("%.png$") and (hs.fs.attributes(p, "modification") or limit) < limit then
-      os.remove(p)
+  -- Dropbox のフォルダは一覧が取れないことがある（その時は消さずに続ける）
+  pcall(function()
+    for f in hs.fs.dir(DEBUG_DIR) do
+      local p = DEBUG_DIR .. "/" .. f
+      if (f:match("%.png$") or f:match("%.jpg$") or f:match("_report%.txt$"))
+         and (hs.fs.attributes(p, "modification") or limit) < limit then
+        os.remove(p)
+      end
+    end
+  end)
+end
+
+-- 読めた文字を、画面のどこにあったか（領域）と伏せ字で並べる（診断用）
+local function regionOf(it, ff, paneX)
+  if not ff then return "?" end
+  if it.x >= ff.x - 4 and it.x <= ff.x + ff.w + 4 and it.y >= ff.y - 4 and it.y <= ff.y + ff.h + 4 then
+    return "検索欄"
+  end
+  if paneX and it.x < paneX then return it.y > ff.y + ff.h and "一覧" or "一覧の上" end
+  if math.abs(it.y - (ff.y + ff.h / 2)) <= L.HEADER_DY then return "ヘッダ行" end
+  return it.y < ff.y and "上端" or "トーク欄"
+end
+local function layoutLines(items, ff, paneX, perRegion)
+  perRegion = perRegion or 25
+  local sorted = {}
+  for _, it in ipairs(items or {}) do sorted[#sorted + 1] = it end
+  table.sort(sorted, function(a, b) if a.y ~= b.y then return a.y < b.y end; return a.x < b.x end)
+  local out, count, order = {}, {}, {}
+  for _, it in ipairs(sorted) do
+    local r = regionOf(it, ff, paneX)
+    if not count[r] then count[r] = 0; order[#order + 1] = r end
+    count[r] = count[r] + 1
+    if count[r] <= perRegion then
+      out[#out + 1] = string.format("[%s] x=%.0f y=%.0f %s", r, it.x, it.y, masked(it.text))
     end
   end
+  for _, r in ipairs(order) do
+    if count[r] > perRegion then out[#out + 1] = string.format("[%s] ほか %d 件", r, count[r] - perRegion) end
+  end
+  return out
 end
 
 -- 段の失敗を返す。その時点の画面を DEBUG_DIR に残す。
--- msg は heartbeat（公開リポジトリ）に載る決まった文言だけにし、OCR で
--- 読んだ文字や他のトーク名など画面由来のものは detail（このMacのログだけ）に分ける。
+-- msg は heartbeat（公開リポジトリ）に載る決まった文言だけにする。画面由来の
+-- もの（ヘッダに見えた名前・保存名など）は detail に分け、伏せ字にしてから
+-- 渡す（コンソールと、Dropbox の診断ファイル latest.txt に出る）。
+-- 画面の撮影があれば読み直して、伏せ字の並び（layout）も付ける（診断ファイル用）。
 local function fail(ctx, stage, msg, cap, detail)
-  return nil, { stage = stage, msg = msg, detail = detail,
-                img = keepDebug(ctx.name, stage, cap, ctx.win) }
+  local layout
+  if cap and ctx.ff then
+    local items = ocr(cap)
+    if items then layout = layoutLines(items, ctx.ff, ctx.paneX) end
+  end
+  local img, imgPath = keepDebug(ctx.name, stage, cap, ctx.win)
+  return nil, { stage = stage, msg = msg, detail = detail, layout = layout,
+                img = img, imgPath = imgPath }
+end
+
+-- 段ごとの経過（check / one でコンソールに出す。画面の文字は伏せ字で渡す）
+local function note(ctx, stage, text)
+  if ctx.trace then ctx.trace[#ctx.trace + 1] = { stage = stage, text = text } end
 end
 
 -- ---------- AX ----------
@@ -414,11 +610,15 @@ end
 
 -- 検索欄を持つ窓＝メイン窓。トークを別窓で開いていると focusedWindow が
 -- そちらになることがあるので、全窓から探す。
-local function findMain(app)
+-- keepMinimized なら最小化された窓は戻さない（診断は画面に何も出さない）。
+local function findMain(app, keepMinimized)
   local best, bestArea
   for _, w in ipairs(app:allWindows() or {}) do
-    if w:isMinimized() then w:unminimize(); wait(0.5) end
-    if w:isVisible() and searchField(w) then
+    if w:isMinimized() and not keepMinimized then
+      guard()                                     -- 実行中なら、人が戻っていれば戻さない
+      w:unminimize(); wait(0.5)
+    end
+    if not w:isMinimized() and w:isVisible() and searchField(w) then
       local f = w:frame()
       if not best or f.w * f.h > bestArea then best, bestArea = w, f.w * f.h end
     end
@@ -508,11 +708,14 @@ local function ensureWindow(app)
   for _ = 1, 3 do
     guard()
     app:activate(true); wait(0.8)
+    guard()                                       -- 待つ間に人が戻ったら、窓を動かさない
     local win = findMain(app)
+    guard()                                       -- 窓を探す間（AX をたどる・最小化を戻す）も同じ
     if win then
       local sf, f = screenOf(win), win:frame()
       if math.abs(f.w - sf.w) > 40 or math.abs(f.h - sf.h) > 40 then
         win:setFrame(sf, 0); wait(0.6)            -- 広い方が名前が切れずに読める
+        guard()
       end
       -- メイン窓を最前面・キー窓にする（別窓で開いたトークにキー入力が行かないように）
       win:focus(); wait(0.4)
@@ -522,6 +725,7 @@ local function ensureWindow(app)
     -- 窓が無い・見えない・検索欄が読めない・前面に来ない → Dock クリック相当で開き直す。
     -- hs.application.open / activate では窓が戻らない（実測）。Escape は使わない
     -- （LINE は Escape で窓やトークを閉じる。10/14 の連鎖失敗の元凶）。
+    guard()
     hs.execute("/usr/bin/open -b " .. LINE_BUNDLE); wait(2)
   end
   return nil
@@ -531,14 +735,15 @@ end
 -- 左ペインの AX のセル（トーク名が載っている）。名前が合わないセルも枠ごと返す
 -- （OCR で見えた候補がどのセルの中か＝どの行かを数えるのに使う）。
 local function rowsByAX(win, paneX, below)
-  local rows = {}
+  local rows, wf = {}, win:frame()
   for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
                                function(e) return role(e) == "AXCell" end, 4000)) do
     local r = axFrame(cell)
     local t = bfs(cell, function(e)
       return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
     end, 40)
-    if r and r.x + r.w / 2 < paneX and r.y > below then
+    -- 窓の下に半分以上はみ出した行（スクロールで隠れた行）は見えていないとみなす
+    if r and r.x + r.w / 2 < paneX and r.y > below and r.y + r.h / 2 < wf.y + wf.h - 2 then
       rows[#rows + 1] = { el = cell, n = t and norm(attr(t, "AXValue")) or "",
                           x = r.x + r.w / 2, y = r.y + r.h / 2, f = r }
     end
@@ -560,14 +765,50 @@ end
 
 local function inside(it, f) return it.x >= f.x and it.x <= f.x + f.w and it.y >= f.y and it.y <= f.y + f.h end
 
--- 名前の行を選ぶ。完全一致の行があればそれ（OCR の位置、無ければ AX のセル）。
+-- 左の一覧とトーク欄の境目（x）。一覧の AX のセルの右端を使う。検索欄の
+-- AX の枠は一覧より狭いことがある（実機で、検索欄の右端より右にも一覧の
+-- 文字が並んでいた）ので、セルが無い時だけ仕切り（AXSplitter）、それも
+-- 無ければ検索欄の右端で代える。実行中は窓が同じ間だけ覚えておく
+-- （AX を毎回たどると遅い）。
+local function listRight(win, ff)
+  local f = win:frame()
+  local memo = string.format("%.0f:%.0f:%.0f:%.0f:%.0f", f.x, f.w, f.h, ff.x, ff.w)
+  if RUN and RUN.listRight and RUN.listRight.memo == memo then
+    return RUN.listRight.x, RUN.listRight.how
+  end
+  local root = hs.axuielement.windowElement(win)
+  local x, how, n = nil, nil, 0
+  for _, cell in ipairs(bfsAll(root, function(e) return role(e) == "AXCell" end, 4000)) do
+    local r = axFrame(cell)
+    -- トーク欄のメッセージのセルは検索欄より右から始まるので数えない
+    if r and r.x < ff.x + ff.w and r.y > ff.y and r.x + r.w < f.x + f.w * 0.7 then
+      n = n + 1; x = math.max(x or 0, r.x + r.w)
+    end
+  end
+  if x then how = "一覧のセル " .. n .. " 個の右端"
+  else
+    local sp = bfs(root, function(e)
+      if role(e) ~= "AXSplitter" then return false end
+      local r = axFrame(e)
+      return r ~= nil and r.x > ff.x and r.h > r.w                -- 縦の仕切り
+    end, 3000)
+    local r = sp and axFrame(sp)
+    if r then x, how = r.x + r.w, "仕切り（AXSplitter）" end
+  end
+  if not x then return ff.x + ff.w + 10, "検索欄の右端（一覧の幅が分からない）" end
+  if RUN then RUN.listRight = { memo = memo, x = x, how = how } end
+  return x, how
+end
+
+-- 名前の行の候補を選ぶ。完全一致の行があればそれ（2行以上あれば上から順に）。
 -- 無ければ部分一致だが、候補が2行以上なら決めずに止める（例: 「かにっこにー」の
 -- 行を OCR が少し読み違え、「かにっこにー3」と並んだ時）。候補は「行」で数える:
 -- OCR で見えた候補はそれを含む AX のセル（無ければ縦に 30pt 以内でまとめた行）、
 -- AX のセルはそのセル。同じ行の名前とプレビューは1つ、AX と OCR の片方にしか
 -- 見えない行も1つとして数える。
+-- OCR で見えた行はその位置を押し、AX にしか見えない行はそのセルを押す（el）。
 -- 返す行には、ヘッダ照合用にその行の OCR の文字（ocrN）も持たせる。
-local function pickRow(ctx, win, items, ff, paneX)
+local function pickRows(ctx, win, items, ff, paneX)
   local function inList(it) return it.y > ff.y + ff.h + 2 and it.x > ff.x - 80 and it.x < paneX end
   local ocrC, top = {}, 0
   for _, it in ipairs(items) do
@@ -583,58 +824,66 @@ local function pickRow(ctx, win, items, ff, paneX)
   end
   if top == 0 then return nil end
 
-  local keys, count, loose_ = {}, 0, {}
-  local function add(k) if not keys[k] then keys[k] = true; count = count + 1 end end
-  local bestO, bestA
+  local rows, byKey, loose_ = {}, {}, {}
+  local function rowFor(k, r)
+    if not byKey[k] then byKey[k] = r; rows[#rows + 1] = r end
+    return byKey[k]
+  end
   for _, c in ipairs(ocrC) do
     if c.sc == top then
-      local key
-      for i, cell in ipairs(cells) do if inside(c, cell.f) then key = "cell" .. i end end
-      if not key then
-        for i, y in ipairs(loose_) do if math.abs(c.y - y) < 30 then key = "y" .. i end end
-        if not key then loose_[#loose_ + 1] = c.y; key = "y" .. #loose_ end
+      local k
+      for i, cell in ipairs(cells) do if inside(c, cell.f) then k = "cell" .. i end end
+      if not k then
+        for i, y in ipairs(loose_) do if math.abs(c.y - y) < 30 then k = "y" .. i end end
+        if not k then loose_[#loose_ + 1] = c.y; k = "y" .. #loose_ end
       end
-      add(key)
-      if not bestO or c.y < bestO.y then bestO = c end
+      local r = rowFor(k, { x = c.x, y = c.y, ocrN = c.n, byOCR = true })
+      if c.y < r.y then r.x, r.y, r.ocrN = c.x, c.y, c.n end
     end
   end
   for i, c in ipairs(cells) do
-    if c.sc == top then add("cell" .. i); if not bestA or c.y < bestA.y then bestA = c end end
-  end
-  if top < 3 and count > 1 then return nil, top, count end
-
-  if bestO then return { x = bestO.x, y = bestO.y, ocrN = bestO.n }, top end
-  -- AX のセルだけで見つかった: そのセルを押す。ヘッダ照合用にセルの中の一番上の OCR の文字
-  local o
-  for _, it in ipairs(items) do
-    if inside(it, bestA.f) and (not o or it.y < o.y) then o = it end
-  end
-  return { x = bestA.x, y = bestA.y, el = bestA.el, ocrN = o and o.n }, top
-end
-
--- ヘッダ（トーク欄の上端）の行。帯の中の一番上の行だけを見る（窓の
--- タイトル「LINE」の行やアイコンだけの行は飛ばす）。その下のメッセージに
--- 同じ名前があっても拾わない。
-local function headerRow(items, paneX, f, winTitle)
-  local band = {}
-  for _, it in ipairs(items) do
-    if it.x > paneX and it.y >= f.y and it.y < f.y + L.HEADER_H then band[#band + 1] = it end
-  end
-  table.sort(band, function(a, b) return a.y < b.y end)
-  local skip = { line = true, [norm(winTitle or "")] = true }
-  local function titleLike(it) return skip[it.n] or (utf8.len(it.n) or 0) <= 1 end
-  -- y が 8pt 以内のものを1行にまとめ、タイトル行でない最初の行を返す
-  local rowsList, cur = {}, nil
-  for _, it in ipairs(band) do
-    if not cur or it.y - cur.y > 8 then cur = { y = it.y }; rowsList[#rowsList + 1] = cur end
-    cur[#cur + 1] = it
-  end
-  for _, row in ipairs(rowsList) do
-    for _, it in ipairs(row) do
-      if not titleLike(it) then return row end
+    if c.sc == top and not byKey["cell" .. i] then
+      -- AX のセルだけで見つかった: そのセルを押す。ヘッダ照合用にセルの中の一番上の OCR の文字
+      local o
+      for _, it in ipairs(items) do
+        if inside(it, c.f) and (not o or it.y < o.y) then o = it end
+      end
+      rowFor("cell" .. i, { x = c.x, y = c.y, el = c.el, ocrN = o and o.n })
     end
   end
-  return nil
+  if top < 3 and #rows > 1 then return nil, top, #rows end
+  table.sort(rows, function(a, b)
+    if (a.byOCR == true) ~= (b.byOCR == true) then return a.byOCR == true end
+    return a.y < b.y
+  end)
+  return rows, top
+end
+
+-- ヘッダ（トーク欄の上端）の行。トーク名は検索欄と同じ高さにある（2026-10 の
+-- 実機）ので、まずその高さの行。そこに何も無い時だけ、帯の中で一番上の行。
+-- 窓のタイトル「LINE」やアイコン（1字）は除く。その下のメッセージに同じ名前が
+-- あっても拾わない。
+local function headerRow(items, paneX, f, winTitle, ff)
+  local skip = { line = true, [norm(winTitle or "")] = true }
+  local band = {}
+  for _, it in ipairs(items) do
+    if it.x > paneX and it.y >= f.y and it.y < f.y + L.HEADER_H
+       and not skip[it.n] and (utf8.len(it.n) or 0) > 1 then
+      band[#band + 1] = it
+    end
+  end
+  table.sort(band, function(a, b) return a.y < b.y end)
+  local cy, level = ff.y + ff.h / 2, {}
+  for _, it in ipairs(band) do
+    if math.abs(it.y - cy) <= L.HEADER_DY then level[#level + 1] = it end
+  end
+  if #level > 0 then return level end
+  local first = {}
+  for _, it in ipairs(band) do
+    if #first > 0 and it.y - first[1].y > 8 then break end
+    first[#first + 1] = it
+  end
+  return #first > 0 and first or nil
 end
 
 -- 開いたトークのヘッダが、押した行と合うか。目的の名前に、押した行と同じ
@@ -656,14 +905,35 @@ local function headerMatches(hrow, tn, row, top)
   return nil
 end
 
-local function openChat(ctx, win)
-  local field, ff = searchField(win)
-  if not ff then return fail(ctx, "検索欄", "検索欄が見つからない") end
-  local f = win:frame()
-  local paneX = ff.x + ff.w + 10               -- これより右がトーク欄
+-- 失敗の記録用: ヘッダの行に見えたもの（伏せ字）
+local function headerSeen(hrow)
+  if not hrow or #hrow == 0 then return "ヘッダ行に文字が見えない" end
+  local t = {}
+  for _, it in ipairs(hrow) do t[#t + 1] = masked(it.text) end
+  return string.format("ヘッダ行（y=%.0f）: %s", hrow[1].y, table.concat(t, " "))
+end
 
-  -- 検索欄にフォーカスを入れる。入ったと確かめられない時はキーを送らない
-  -- （前のトークのメッセージ入力欄に名前を貼ってしまわないように）
+-- 押した行のトークが開いたか、ヘッダを読んで確かめる。開くのに時間が
+-- かかることがあるので、4秒までは読み直す。
+-- 戻り値: ヘッダのトーク名（OCR の1件）/ nil, "ocr" か "mismatch", 撮影, 詳細
+local function confirmHeader(ctx, win, ff, paneX, row, top)
+  local f, limit = win:frame(), now() + 4
+  while true do
+    local cap = capture(win, "header")
+    local items, oerr = ocr(cap)
+    if not items then return nil, "ocr", cap, oerr end
+    local hrow = headerRow(items, paneX, f, win:title(), ff)
+    local hdr = headerMatches(hrow, ctx.tn, row, top)
+    if hdr then return hdr end
+    if now() >= limit then return nil, "mismatch", cap, headerSeen(hrow) end
+    wait(0.5)
+  end
+end
+
+-- 検索欄に名前を入れる。フォーカスが入ったと確かめられない時はキーを送らない
+-- （前のトークのメッセージ入力欄に名前を貼ってしまわないように）。
+-- フォーカスが入らないと分かった時だけ false。
+local function typeName(ctx, field, ff)
   guard()
   pcall(function() field:setAttributeValue("AXFocused", true) end); wait(0.2)
   local focused = fieldFocused(field, ff)
@@ -671,9 +941,7 @@ local function openChat(ctx, win)
     clickAt(ff.x + ff.w / 2, ff.y + ff.h / 2); wait(0.3)   -- 位置は AX の枠から
     focused = fieldFocused(field, ff)
   end
-  if focused == false then
-    return fail(ctx, "検索欄", "検索欄にフォーカスが入らない（キー入力はしていない）")
-  end
+  if focused == false then return false end
   if focused then
     key({"cmd"}, "a"); wait(0.1)
     pasteText(ctx.name, function() return norm(attr(field, "AXValue") or "") == ctx.tn end)
@@ -685,49 +953,80 @@ local function openChat(ctx, win)
     -- （どこにフォーカスがあるか分からない所にキーは送らない）
     pcall(function() field:setAttributeValue("AXValue", ctx.name) end); wait(1.0)
   end
+  return true
+end
 
-  -- 左ペイン（検索欄より下・トーク欄より左）を読んで、名前の行を探す。
-  -- 検索結果の表示が遅れることがあるので、見つからなければ1回だけ読み直す。
-  local cap, items, oerr, row, top, many
-  for i = 1, 2 do
+local function openChat(ctx, win)
+  local field, ff = searchField(win)
+  if not ff then return fail(ctx, "検索欄", "検索欄が見つからない") end
+  local paneX, how = listRight(win, ff)
+  ctx.ff, ctx.paneX = ff, paneX
+  note(ctx, "一覧", string.format("検索欄 x=%.0f〜%.0f y=%.0f / 一覧とトーク欄の境目 x=%.0f（%s）",
+    ff.x, ff.x + ff.w, ff.y + ff.h / 2, paneX, how))
+
+  -- 行を押して、ヘッダで確かめる
+  local function open(row, top, via)
+    if row.el then
+      if not press(row.el) then clickAt(row.x, row.y) end
+    else
+      clickAt(row.x, row.y)
+    end
+    wait(1.2)
+    local hdr, why, cap, seen = confirmHeader(ctx, win, ff, paneX, row, top)
+    if hdr then
+      note(ctx, "トーク確認", string.format("%sを押して開き、ヘッダ（y=%.0f）で %s を確かめた",
+        via, hdr.y, masked(hdr.text)))
+      return { header = hdr, paneX = paneX }
+    end
+    return nil, why, cap, seen
+  end
+
+  -- 1) 今の一覧に名前がそのまま（完全一致で）見えていれば、検索せずに押す。
+  --    検索欄が空（普段の一覧）の時だけ。前の件の検索結果には「メッセージ」の
+  --    行なども並び、そこから開くと古い所が開くので使わない
+  local cap, items, oerr, rows, top, many
+  if norm(attr(field, "AXValue") or "") == "" then
     cap = capture(win, "list")
     items, oerr = ocr(cap)
     if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
-    row, top, many = pickRow(ctx, win, items, ff, paneX)
-    if row or many or i == 2 then break end        -- 候補が複数なら待っても変わらない
+    rows, top, many = pickRows(ctx, win, items, ff, paneX)
+  end
+  if rows and top == 3 then
+    note(ctx, "トーク選択", "今の一覧に見えていた（検索しない）")
+    local st, why, hcap, seen = open(rows[1], top, "一覧の行")
+    if st then return st end
+    if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
+    log("一覧の行では " .. ctx.name .. " を確かめられなかったので、検索して開き直す（" .. seen .. "）")
+  end
+
+  -- 2) 検索欄に名前を入れ、出てきた行を押す
+  if not typeName(ctx, field, ff) then
+    return fail(ctx, "検索欄", "検索欄にフォーカスが入らない（キー入力はしていない）")
+  end
+  for i = 1, 2 do                                -- 検索結果の表示が遅れることがある
+    cap = capture(win, "list")
+    items, oerr = ocr(cap)
+    if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
+    rows, top, many = pickRows(ctx, win, items, ff, paneX)
+    if rows or many or i == 2 then break end     -- 候補が複数なら待っても変わらない
     wait(1.0)
   end
-  if not row then
+  if not rows then
     if many then
       return fail(ctx, "トーク選択", "名前に合う候補が " .. many .. " 件あり決められない" ..
         "（TARGETS の名前を LINE の表示どおりに）", cap)
     end
-    return fail(ctx, "トーク選択", "検索結果に名前が見えない", cap)
+    return fail(ctx, "トーク選択", "一覧にも検索結果にも名前が見えない", cap)
   end
-  if row.el then
-    if not press(row.el) then clickAt(row.x, row.y) end
-  else
-    clickAt(row.x, row.y)
+  note(ctx, "トーク選択", "検索して見つけた（" .. (top == 3 and "完全一致" or "部分一致") .. "）")
+  local hcap, seen
+  for k = 1, math.min(#rows, 2) do               -- 完全一致が2行あれば2行目も試す
+    local st, why
+    st, why, hcap, seen = open(rows[k], top, "検索結果の行")
+    if st then return st end
+    if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
   end
-  wait(1.2)
-
-  -- ヘッダを読んで、開いたのが押した行のトークか確かめる。開くのに時間が
-  -- かかることがあるので、合わなければ1回だけ読み直す。
-  local hrow, hdr
-  for i = 1, 2 do
-    cap = capture(win, "header")
-    items, oerr = ocr(cap)
-    if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
-    hrow = headerRow(items, paneX, f, win:title())
-    hdr = headerMatches(hrow, ctx.tn, row, top)
-    if hdr then break end
-    if i == 1 then wait(1.0) end
-  end
-  if not hdr then
-    return fail(ctx, "トーク確認", "開いたトークが違う", cap,
-      "ヘッダ: 「" .. (hrow and hrow[1].text or "読めず") .. "」")
-  end
-  return { header = hdr, paneX = paneX }
+  return fail(ctx, "トーク確認", "開いたトークが違う（またはヘッダの名前が読めない）", hcap, seen)
 end
 
 -- ---------- 3. ⋮ →「トークを保存」 ----------
@@ -766,7 +1065,10 @@ local function pressSaveChat(ctx, win, st)
         if isSaveLabel(it.n) and (not hit or it.y < hit.y) then hit = it end
       end
     end
-    if hit then clickAt(hit.x, hit.y); return true end
+    if hit then
+      note(ctx, "メニュー", string.format("⋮（x=%.0f y=%.0f）→「トークを保存」を押した", dotsX + d[1], st.header.y + d[2]))
+      clickAt(hit.x, hit.y); return true
+    end
     -- 開いたのに目的の項目が無い → ヘッダのトーク名を押して閉じる
     -- （Escape は窓/トークを閉じるので使わない）
     if hint or fresh >= 3 then
@@ -777,7 +1079,8 @@ local function pressSaveChat(ctx, win, st)
   if opened then
     return fail(ctx, "メニュー", "メニューは開いたが「トークを保存」が見当たらない", lastCap)
   end
-  return fail(ctx, "メニュー", "⋮ を押してもメニューが出ない（⋮ の位置: L.MENU_FROM_RIGHT）", lastCap)
+  return fail(ctx, "メニュー", "⋮ を押してもメニューが出ない（⋮ の位置: L.MENU_FROM_RIGHT）", lastCap,
+    string.format("⋮ を押した位置 x=%.0f y=%.0f（窓の右端 %.0f）", dotsX, st.header.y, f.x + f.w))
 end
 
 -- ---------- 4. 保存 → OUT_DIR へ移す ----------
@@ -839,6 +1142,22 @@ local function nameMatches(cur, name)
   return b == n or b == loose(name .. "とのトーク") or b == loose(name .. "のトーク")
 end
 
+-- 保存名・ファイル名の伏せ字。TARGETS のどれかと同じトークならその名前、
+-- 違えば字数だけ（他のトーク名をログや診断ファイルに出さない）
+local function maskedSave(cur)
+  cur = tostring(cur or "")
+  -- ファイルのパス（/ か ~ で始まる）だけ、置き場所とファイル名に分ける。
+  -- 名前欄の値はトーク名の「/」をそのまま含むので、分けずに全体を伏せる
+  local dir, base = cur:match("^([/~].*/)([^/]*)$")
+  if dir then return dir:gsub("^" .. HOME:gsub("%p", "%%%0"), "~") .. maskedSave(base) end
+  for _, t in ipairs(TARGETS) do
+    if nameMatches(cur, targetName(t)) then return "[LINE]〈" .. targetName(t) .. "〉" end
+  end
+  local body = cur:gsub("%.txt$", ""):gsub("^%[LINE%]", "")
+  return (cur:match("^%[LINE%]") and "[LINE]" or "") .. "■" .. (utf8.len(body) or #body) .. "字" ..
+    (cur:match("%.txt$") and ".txt" or "")
+end
+
 local function saveAndMove(ctx, app, st)
   local sheet = waitFor(function() return findSheet(app) end, 6)
   if not sheet then
@@ -853,11 +1172,17 @@ local function saveAndMove(ctx, app, st)
   -- 違うダイアログなら何も打たずに閉じる。
   if not (cur:match("^%[LINE%]") and findButton(sheet, { "保存", "Save" })
           and findButton(sheet, { "キャンセル", "Cancel" })) then
-    return failSheet(ctx, app, "保存ダイアログ", "トークの保存ダイアログに見えない", "名前欄: " .. cur)
+    return failSheet(ctx, app, "保存ダイアログ", "トークの保存ダイアログに見えない", "名前欄: " .. maskedSave(cur))
   end
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
   if not nameMatches(cur, ctx.name) then
-    return failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. cur)
+    return failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
+  end
+  if ctx.dry then
+    -- 確認だけ（check）: 保存名まで確かめたら、何も打たずにキャンセルする
+    if not cancelSheet(app) then return fail(ctx, "保存ダイアログ", "確認の後、保存ダイアログを閉じられない") end
+    note(ctx, "保存ダイアログ", "保存名 " .. maskedSave(cur) .. " を確かめた（確認なのでキャンセルした）")
+    return "dry"
   end
 
   -- ファイル名に書き出し日を付ける（[LINE]○○_20261020.txt）。既定名は毎回
@@ -906,7 +1231,7 @@ local function saveAndMove(ctx, app, st)
     local p = OUT_DIR .. "/" .. posix
     return fresh(p, since) and p
   end, 3, 0.5) or waitFor(function() return findSaved(savedAs, since) end, 4, 0.5)
-  if not src then return fail(ctx, "移動", "保存したファイルが見つからない", nil, savedAs) end
+  if not src then return fail(ctx, "移動", "保存したファイルが見つからない", nil, maskedSave(savedAs)) end
   -- OUT_DIR では / と : を _ にそろえる（ingest.py の safe_filename と同じ扱い）
   local dst = OUT_DIR .. "/" .. stampedName(savedAs):gsub("[/:]", "_")
   if src ~= dst and not os.rename(src, dst) then
@@ -916,9 +1241,29 @@ local function saveAndMove(ctx, app, st)
   -- ---------- 5. 確認 ----------
   if (hs.fs.attributes(dst, "size") or 0) == 0 then
     return fail(ctx, "移動", "Linetxt に移せない（ダウンロード等へのアクセス許可を確認: " ..
-      "docs/setup-mac-auto.md 手順3）", nil, src)
+      "docs/setup-mac-auto.md 手順3）", nil, maskedSave(src))
   end
   return dst
+end
+
+-- 想定外のエラー文（Lua のファイルパス入り）からホームのパスを ~ にする
+local function tidy(s)
+  s = tostring(s)
+  local i, j = s:find(HOME, 1, true)
+  while i do
+    s = s:sub(1, i - 1) .. "~" .. s:sub(j + 1)
+    i, j = s:find(HOME, i + 1, true)
+  end
+  return s
+end
+
+-- heartbeat（公開）用は決まった文言と画像の置き場だけ。detail（伏せ字済み）は
+-- コンソールと診断ファイル（Dropbox）だけに出す。
+local function describe(e, withDetail)
+  if type(e) ~= "table" then return tostring(e) end
+  return "[" .. e.stage .. "] " .. e.msg ..
+    (withDetail and e.detail and ("（" .. e.detail .. "）") or "") ..
+    (e.img and ("（画像: " .. e.img .. "）") or "")
 end
 
 local function exportSteps(app, ctx)
@@ -935,18 +1280,24 @@ local function exportSteps(app, ctx)
   if not win then
     return false, select(2, fail(ctx, "窓", "LINE の窓が開かない・前面に来ない（検索欄のある窓が無い）"))
   end
+  local f = win:frame()
+  note(ctx, "窓", string.format("メイン窓（x=%.0f y=%.0f %.0f×%.0f）を前面にした", f.x, f.y, f.w, f.h))
   local st, e = openChat(ctx, win)
   if not st then return false, e end
   local ok; ok, e = pressSaveChat(ctx, win, st)
   if not ok then return false, e end
   local dst; dst, e = saveAndMove(ctx, app, st)
   if not dst then return false, e end
+  if dst == "dry" then return true, "（確認だけ。保存はしていない）" end
+  note(ctx, "保存", "保存して Linetxt に置いた（" .. (dst:match("[^/]+$") or dst) .. "）")
   return true, dst
 end
 
--- 1件を書き出す。人の操作を検知したら error({abort=…}) で全体を止める。
-local function exportOne(app, name)
-  local ctx = { name = name, tn = norm(name) }
+-- 1件を書き出す（opts.dry なら保存ダイアログで保存名を確かめてキャンセルするまで）。
+-- 人の操作を検知したら error({abort=…}) で全体を止める。opts.trace に段ごとの経過。
+local function exportOne(app, name, opts)
+  opts = opts or {}
+  local ctx = { name = name, tn = norm(name), dry = opts.dry, trace = opts.trace or {} }
   local ok, r1, r2 = pcall(exportSteps, app, ctx)
   if ok then return r1, r2 end
   if type(r1) == "table" and r1.blocked then
@@ -956,23 +1307,37 @@ local function exportOne(app, name)
   error(r1, 0)
 end
 
--- 想定外のエラー文（Lua のファイルパス入り）からホームのパスを ~ にする
-local function tidy(s)
-  s = tostring(s)
-  local i, j = s:find(HOME, 1, true)
-  while i do
-    s = s:sub(1, i - 1) .. "~" .. s:sub(j + 1)
-    i, j = s:find(HOME, i + 1, true)
+-- 失敗した時の「次にすること」（コンソール用）。この Mac で人が手を動かせば
+-- 直るものだけ具体的に書く。読み方・押し方の問題は、診断と撮影画像を Dropbox に
+-- 残すので、それを見て直した版を出す（Claude に「LINE書き出しの診断を見て直して」と頼む）。
+local NO_HINT = "この Mac ですることは無い。診断と撮影画像を " .. DEBUG_SHOW ..
+                " に残したので、Claude に「LINE書き出しの診断を見て直して」と頼む"
+local function hintFor(e)
+  local st, detail = e.stage, tostring(e.detail or "")
+  if tostring(e.msg):find("保存ダイアログを閉じられない", 1, true) then
+    return "LINE に保存ダイアログが出たままになっている。その「キャンセル」を手で押して閉じてから、もう一度"
+  elseif st == "窓" or st == "検索欄" then
+    return "LINE を開いて、トークの一覧（検索欄のある画面）を出しておく。別窓で開いたトークは閉じる"
+  elseif st == "OCR" and detail:find("画面を撮れない", 1, true) then
+    return "画面収録の許可を確かめる（システム設定 → プライバシーとセキュリティ → " ..
+           "画面とシステムオーディオ録音 → Hammerspoon をオン → Hammerspoon を再起動）"
+  elseif st == "OCR" then
+    return "OCR（mac/ocr.applescript）が動かない。ターミナルで osascript " .. tidy(OCR_SCRIPT) ..
+           " <画像> を試し、出たエラーを Claude に見せる"
+  elseif st == "トーク選択" then
+    return "TARGETS の名前を LINE の表示どおりに直す（⌘⌥⌃J で一覧を出せる）"
+  elseif st == "保存ダイアログ" and tostring(e.msg):find("合わない", 1, true) then
+    return "トーク名が変わったのかもしれない。LINE の表示名を確かめて TARGETS を直す（⌘⌥⌃J で一覧）"
+  elseif st == "保存" and tostring(e.msg):find("上書き", 1, true) then
+    return "過去の書き出しを上書きしないよう止めた。LINE で ⋮ →「トークを保存」を手で開き、名前欄に日付を足せるか確かめる"
+  elseif st == "クリック" then
+    return "集中モード（おやすみモード）を ON にして通知を止め、LINE の上に他の窓が無い状態でもう一度"
+  elseif st == "移動" then
+    return "ダウンロード等へのアクセス許可を確かめる（docs/setup-mac-auto.md 手順3）"
+  elseif st == "中断" and not tostring(e.msg):find("時間切れ", 1, true) then
+    return "実行中はマウスやキーに触らない（触ると止まる）。もう一度"
   end
-  return s
-end
-
--- heartbeat（公開）用は決まった文言と画像パスだけ。detail はこのMacのログだけ。
-local function describe(e, withDetail)
-  if type(e) ~= "table" then return tostring(e) end
-  return "[" .. e.stage .. "] " .. e.msg ..
-    (withDetail and e.detail and ("（" .. e.detail .. "）") or "") ..
-    (e.img and ("（画像: " .. e.img .. "）") or "")
+  return NO_HINT
 end
 
 -- ダウンロード・デスクトップ・書類に一度触って、「ファイルとフォルダ」の
@@ -1006,199 +1371,61 @@ local function prepareApp(attended)
   return app
 end
 
-local function targetName(t) return type(t) == "table" and t[1] or t end
-
 -- 実行の始まりと終わり。手を離して静かになるのを待ってから見張りを始める
 -- （ホットキーや「許可」を押した直後に手が動いていると、自分で止めてしまう）。
 -- 10秒待っても静かにならなければ始めない（false）。
 -- AX の応答待ちは短くする（LINE が固まっても1回あたり数秒で返す）。
-local function beginRun(app)
+-- 実行中は画面を消さない（途中で消えてロックされると、残りが全部失敗する）。
+-- 無人の時は、画面が暗くなっていれば起こしてから始める（ロック中は maybeRun で除く）。
+local function beginRun(app, auto)
+  if auto then pcall(function() hs.caffeinate.declareUserActivity() end) end
   local quiet = waitFor(function()
     local p1 = hs.mouse.absolutePosition(); wait(0.5)
     local p2 = hs.mouse.absolutePosition()
     return idleSeconds() >= 1.5 and math.abs(p1.x - p2.x) < 1 and math.abs(p1.y - p2.y) < 1
   end, 10, 0.1)
   if not quiet then return false end
+  local okd, keep = pcall(function() return hs.caffeinate.get("displayIdle") end)
   RUN = { deadline = now() + RUN_LIMIT_MIN * 60, lastSynth = now(),
-          mouse = hs.mouse.absolutePosition(), pid = app:pid(), app = app }
+          mouse = hs.mouse.absolutePosition(), pid = app:pid(), app = app,
+          displayIdle = okd and keep == true }
+  pcall(function() hs.caffeinate.set("displayIdle", true) end)
   pcall(function() hs.axuielement.systemWideElement():setTimeout(2) end)
   return true
 end
 local function endRun()
+  local keep = RUN and RUN.displayIdle
   RUN = nil
+  pcall(function() hs.caffeinate.set("displayIdle", keep == true) end)
   pcall(function() hs.axuielement.systemWideElement():setTimeout(AX_TIMEOUT_AFTER) end)
 end
 
 -- 書き出した txt を取り込んで push する。第2引数の true は「ログインシェルの
 -- 環境を使う」指定。これが無いと PATH が最小限になり、git や python が
 -- 見つからないことがある。
+-- 戻り値: "push済" / "変更なし" / "push できず"（詳しくは mac/sync.log）。
+-- sync.sh の出力には取り込んだファイル名（トーク名）が入るので、コンソールには結果だけ出す。
 local function runSync()
-  local out = hs.execute('/bin/bash "' .. REPO .. '/mac/sync.sh" 2>&1', true)
-  log("sync:\n" .. (out or ""))
-  return (out or ""):match("push 完了") and "push済" or "push無し"
+  local out = hs.execute('/bin/bash "' .. REPO .. '/mac/sync.sh" 2>&1', true) or ""
+  local r
+  if out:find("push 完了", 1, true) then r = "push済"
+  elseif out:find("変更なし", 1, true) or out:find("取り込む txt が無い", 1, true) then r = "変更なし"
+  else r = "push できず" end
+  log("sync: " .. r .. (r == "push できず" and ("（理由は " .. tidy(REPO) .. "/mac/sync.log）") or ""))
+  return r
 end
 
-local function writeHeartbeat(okN, ngN, ngLines, note)
-  local hb = io.open(REPO .. "/mac/heartbeat.txt", "w")
-  if not hb then return end
-  hb:write(string.format("last_run: %s\nversion: v4 (OCR)\nok: %d\nng: %d\n",
-    os.date("%Y-%m-%d %H:%M:%S"), okN, ngN))
-  if note then hb:write("note: " .. note .. "\n") end
-  if #ngLines > 0 then
-    hb:write("failures:\n")
-    for _, line in ipairs(ngLines) do hb:write("  - " .. line .. "\n") end
-  end
-  hb:close()
-end
-
--- 1件だけ試す。Hammerspoon コンソールから:
---   __LINE_EXPORT.one("Berry")
-function M.one(name)
-  local app, err, why = prepareApp(true)
-  if not app then
-    log(err); hs.alert.show(err .. (why and "。開いたらもう一度実行" or ""), 4); return false
-  end
-  if not beginRun(app) then
-    hs.alert.show("手が動いているので始めなかった。手を離してからもう一度", 4); return false
-  end
-  local okc, ok, e = pcall(exportOne, app, name)
-  endRun()
-  if not okc then
-    if type(ok) == "table" and ok.abort then
-      log("中断: " .. ok.abort); hs.alert.show("LINE書き出しを中断: " .. ok.abort, 4); return false
-    end
-    ok, e = false, { stage = "内部エラー", msg = tidy(ok) }
-  end
-  if not ok then
-    log("NG  " .. name .. "  " .. describe(e, true))
-    hs.alert.show("NG: " .. name .. "\n" .. describe(e, true), 6)
-    return false
-  end
-  log("OK  " .. name .. " → " .. e)
-  local pushed = runSync()
-  hs.alert.show("書き出しOK: " .. name .. " / " .. pushed, 4)
-  return true
-end
-
--- 今日すでに書き出せたトーク。人の操作で中断した日にやり直す時は、
--- 済んだものを飛ばして残りから進める（毎回1件目からだと後ろが届かない）。
-local DONE = { day = "", ok = {} }
-
--- 全件を書き出す。auto=true は無人の自動実行。戻り値:
---   "done" 最後まで / "aborted" 人の操作で止めた（やり直してよい）/
---   "notready" LINE を起動しただけ（その日の回数は使わない）/ "failed" 始められない
-local function runExport(auto)
-  if #TARGETS == 0 then
-    hs.alert.show("TARGETS が空です。line_export.lua を編集してください", 4)
-    log("TARGETS が空"); return "failed"
-  end
-
-  local app, err, why = prepareApp(not auto)
-  if not app then
-    log(err)
-    if why == "notrunning" then
-      hs.alert.show(err .. (auto and "（次の確認で実行）" or "。開いたらもう一度 ⌘⌥⌃L"), 6)
-      return "notready"
-    end
-    -- 原因をリポジトリに残す（このMacのログを毎回見に行かなくて済むように）
-    hs.alert.show("LINE書き出し中止: " .. err, 6)
-    writeHeartbeat(0, #TARGETS, { "全件: " .. err })
-    runSync()
-    return "failed"
-  end
-
-  if not beginRun(app) then
-    log("手が動いているので始めなかった")
-    if not auto then hs.alert.show("手が動いているので始めなかった。手を離してからもう一度 ⌘⌥⌃L", 4) end
-    return "aborted"
-  end
-  if DONE.day ~= today() then DONE = { day = today(), ok = {} } end
-  local okN, ngN, ngLines, stopped = 0, 0, {}, nil
-  for i, t in ipairs(TARGETS) do
-    local name = targetName(t)
-    if auto and DONE.ok[name] then
-      okN = okN + 1; log("済み " .. name .. "（今日の前の実行で書き出し済み）")
-      goto continue
-    end
-    -- 1件の想定外エラーで残りを止めず、heartbeat も必ず書く
-    local okc, ok, e = pcall(exportOne, app, name)
-    if not okc then
-      if type(ok) == "table" and ok.abort then
-        stopped = ok.abort .. "（" .. i .. "/" .. #TARGETS .. " 件目で中断）"
-        break
-      end
-      ok, e = false, { stage = "内部エラー", msg = tidy(ok) }
-    end
-    if ok then
-      okN = okN + 1; DONE.ok[name] = true; log("OK  " .. name .. " → " .. e)
-    else
-      ngN = ngN + 1; log("NG  " .. name .. "  " .. describe(e, true))
-      ngLines[#ngLines + 1] = name .. ": " .. describe(e)
-    end
-    wait(0.8)
-    ::continue::
-  end
-  endRun()
-  if stopped then log("中断: " .. stopped) end
-
-  -- 結果をリポジトリに残す。ログはこのMacにしか無く、失敗の理由を
-  -- 毎回コンソールから貼ってもらうのは現実的でないため、push して共有する。
-  -- （撮影画像は DEBUG_DIR に残すだけで push しない）
-  writeHeartbeat(okN, ngN, ngLines, stopped and ("中断: " .. stopped))
-
-  local pushed = runSync()
-  hs.alert.show(string.format("LINE書き出し OK:%d NG:%d%s / %s", okN, ngN,
-    stopped and (" 中断") or "", pushed), 4)
-  return stopped and "aborted" or "done"
-end
-
--- OCR 診断: 今の LINE の窓を撮って、読めた文字と位置をコンソールに出す。
--- 画面収録の許可や、OCR が名前・メニューを読めているかの確認用。
-function M.diag()
-  local app = hs.application.find(LINE_BUNDLE)
-  local win = app and (findMain(app) or app:focusedWindow() or app:mainWindow())
-  if not win then hs.alert.show("LINEの窓が見つからない", 3); return end
-  app:activate(true); wait(0.5)
-  local cap = capture(win, "diag", screenOf(win))
-  local items, oerr = ocr(cap)
-  if not items then print("OCR 診断: " .. oerr); hs.alert.show(oerr, 5); return end
-  local f = win:frame()
-  print(string.format("=== OCR 診断 %d件（画面収録: %s / 窓 x=%.0f y=%.0f w=%.0f h=%.0f）===",
-    #items, screenRecordingOK() and "許可" or "未許可", f.x, f.y, f.w, f.h))
-  for _, it in ipairs(items) do print(string.format("  %5.0f,%5.0f  %s", it.x, it.y, it.text)) end
-  local img = keepDebug("diag", "ocr", cap, win)
-  hs.alert.show(string.format("OCR %d件をコンソールに出力\n%s", #items, img or "画像を保存できず"), 4)
-end
-
--- 二重読み込み対策。init.lua に dofile 行が複数入っていたり、Reload を
--- 繰り返したりしても、タイマーとホットキーが多重にならないようにする。
--- （多重になると 07:00 に自動操作が同時に2本走り、LINE の画面を奪い合う）
-if _G.__LINE_EXPORT then
-  local prev = _G.__LINE_EXPORT
-  if prev.timer then prev.timer:stop() end
-  if prev.waker then prev.waker:stop() end
-  for _, hk in ipairs(prev.hotkeys or {}) do hk:delete() end
-  log("前回の読み込み分を解除して張り直します")
-end
-M.hotkeys = {}
-
--- Ctrl版・Shift版の両方に割り当てる。以前ここは ⌘⌥⌃ を使う別スクリプトと
--- 競合していたため一度 Shift に逃がしたが、そちらを無効化した後も
--- 手が Ctrl を覚えているはずなので、どちらを押しても動くようにしておく。
-local function bindBoth(k, fn)
-  for _, mods in ipairs({{"cmd","alt","ctrl"}, {"cmd","alt","shift"}}) do
-    M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(mods, k, fn)
-  end
-end
-
+-- ---------- 毎日の自動実行の状態 ----------
 -- 毎日1回を「取りこぼさない」ための追いかけ実行。
 --
 -- 固定時刻の hs.timer.doAt は Mac がスリープしていると発火せず、起きた後も
 -- 追いかけない。実測でも 27日間で 07:00 に走ったのは1度だけだった。
 -- そこで一定間隔で「今日はもう走ったか」を確認し、条件が整った最初の
 -- タイミングで実行する。スリープから復帰した直後も確認する。
-local STATE_PATH = REPO .. "/mac/.last_run"   -- 最後に走った日 (YYYYMMDD[:中断回数])
-local CHECK_EVERY   = 600   -- 10分ごとに条件を確認
+local STATE_PATH    = REPO .. "/mac/.last_run"     -- 最後に走った日 (YYYYMMDD[:中断回数])
+local RESULT_PATH   = REPO .. "/mac/.last_result"  -- 今日の結果（版・失敗数・書き出せたトーク）
+local LOADED_PATH   = REPO .. "/mac/.loaded_version"
+local CHECK_EVERY   = 60    -- 1分ごとに条件を確認（離席して画面が消えるまでの間を逃さない）
 local IDLE_REQUIRED = 180   -- 3分以上操作が無ければ「離席中」とみなす
 local MAX_ABORTS    = 3     -- 人の操作で中断した日は、離席を待ってこの回数までやり直す
 
@@ -1214,6 +1441,49 @@ end
 local function writeState(s)
   local f = io.open(STATE_PATH, "w")
   if f then f:write(s .. "\n"); f:close() end
+end
+
+-- 今日の結果。読み込み直しても、書き出せたトークを飛ばして続きからやれるように。
+--   day / version（その結果を出した版）/ ng（最後まで回った時の失敗数）/
+--   ok=（書き出せたトーク）/ failed=（始められなかった理由）/ stopped=（中断の理由）
+-- 前の版（v4）は書かないので、無ければ heartbeat から日付・版・失敗数だけ読む。
+local function readResult()
+  local r = { day = "", version = "", ng = 0, ok = {} }
+  local f = io.open(RESULT_PATH, "r")
+  if f then
+    for line in f:lines() do
+      local k, v = line:match("^(%w+)=(.*)$")
+      if k == "day" then r.day = v
+      elseif k == "version" then r.version = v
+      elseif k == "ng" then r.ng = tonumber(v) or 0
+      elseif k == "ok" then r.ok[v] = true
+      elseif k == "failed" then r.failed = v
+      elseif k == "stopped" then r.stopped = v end
+    end
+    f:close()
+    return r
+  end
+  local hb = readAll(REPO .. "/mac/heartbeat.txt") or ""
+  local y, m, d = hb:match("last_run: (%d+)%-(%d+)%-(%d+)")
+  if y then r.day = y .. m .. d end
+  r.version = hb:match("version: ([^\n]+)") or ""
+  r.ng = tonumber(hb:match("\nng: (%d+)")) or 0
+  return r
+end
+local function writeResult(r)
+  local f = io.open(RESULT_PATH, "w")
+  if not f then return end
+  f:write("day=" .. (r.day or today()) .. "\nversion=" .. (r.version or VERSION) .. "\nng=" .. (r.ng or 0) .. "\n")
+  for n in pairs(r.ok or {}) do f:write("ok=" .. n .. "\n") end
+  if r.failed then f:write("failed=" .. r.failed:gsub("[\r\n]", " ") .. "\n") end
+  if r.stopped then f:write("stopped=" .. r.stopped:gsub("[\r\n]", " ") .. "\n") end
+  f:close()
+end
+-- 今日の結果（別の日の結果なら空から）
+local function todayResult()
+  local r = readResult()
+  if r.day ~= today() then r = { day = today(), version = "", ng = 0, ok = {} } end
+  return r
 end
 
 local function screenLocked()
@@ -1249,43 +1519,532 @@ local function watchedScreen()
   return oka and why or nil
 end
 
-local skipLogged, skipReported = {}, {}
+-- ---------- 状態の表示（status と診断ファイル）----------
+local function gitBranch()
+  local out = hs.execute("git -C " .. sh(REPO) .. " symbolic-ref --short -q HEAD 2>/dev/null", true)
+  return (((out or ""):match("([^\r\n]+)[\r\n]*$") or ""):gsub("%s", ""))
+end
+local function displaySleepMin()
+  local out = hs.execute("/usr/bin/pmset -g 2>/dev/null")
+  return tonumber((out or ""):match("displaysleep%s+(%d+)"))
+end
+
+local function statusLines()
+  local t = {}
+  local function add(ok, s) t[#t + 1] = (ok == true and "✓ " or ok == false and "✗ " or "・") .. s end
+  add(nil, "版: " .. VERSION .. "（" .. LOADED_AT .. " に読み込み）")
+  add(screenRecordingOK(), "画面収録の許可")
+  add(hs.application.find(LINE_BUNDLE) ~= nil, "LINE が起動している")
+  add(hs.fs.attributes(OCR_SCRIPT, "mode") == "file", "OCR スクリプト（mac/ocr.applescript）")
+  add(hs.fs.attributes(OUT_DIR, "mode") == "directory", "保存先フォルダ（Linetxt）")
+  local br = gitBranch()
+  add(br == "main", "リポジトリのブランチ: " .. (br ~= "" and br or "不明") ..
+    (br == "main" and "" or "（main 以外では取り込み・push をしない）"))
+  local day, aborts = readState()
+  local res = todayResult()
+  if res.failed then
+    -- 残すのは自動実行の「始められない」だけ（手動の失敗はその場でアラートとコンソールに出る）
+    add(false, "今日の自動実行: 始められない（" .. res.failed .. "）。直れば次の確認で自動で始める")
+  end
+  if day == today() and aborts == nil then
+    local known = res.version ~= ""
+    local retry = known and res.ng > 0 and res.version ~= VERSION
+    add(nil, "今日の書き出し: 済み" .. (known and ("（失敗 " .. res.ng .. " 件）") or "") ..
+      (retry and "。新しい版が入ったので、離席したら失敗分をやり直す" or ""))
+  elseif day == today() and aborts and aborts > 0 then
+    add(nil, "今日の自動実行: " .. aborts .. " 回中断（最後: " .. (res.stopped or "理由不明") .. "）" ..
+      (aborts >= MAX_ABORTS and "。今日は自動ではもうやらない（⌘⌥⌃L で手動）" or "。離席したら続きからやり直す"))
+  elseif not res.failed then
+    add(nil, "今日の自動実行: まだ")
+  end
+  add(nil, string.format("自動実行の条件: 毎日 %s 以降、%d 分以上 Mac を触っていない・画面ロック無し（%d 秒ごとに確認）",
+    RUN_AT, IDLE_REQUIRED // 60, CHECK_EVERY))
+  add(nil, "最後の確認: " .. (M.lastCheck and (os.date("%H:%M", M.lastCheck.at) .. " " .. M.lastCheck.why)
+                                          or "まだ（読み込んだ直後）"))
+  local okn, nt = pcall(function() return M.timer and M.timer:nextTrigger() end)
+  if okn and type(nt) == "number" then add(nil, string.format("次の確認: 約 %d 秒後", math.floor(nt))) end
+  add(nil, string.format("今の無操作時間: %.0f 秒", idleSeconds()))
+  local locked = screenLocked()
+  add(not locked, "画面ロック: " .. (locked and "中（ロック中は自動実行しない）" or "なし"))
+  local ds = displaySleepMin()
+  if ds then
+    if ds > 0 and ds * 60 <= IDLE_REQUIRED then
+      add(false, "画面が " .. ds .. " 分で消える設定。" .. IDLE_REQUIRED // 60 ..
+        " 分の離席を待つ前に消えてロックされると、自動実行が始まらない")
+    else
+      add(true, "画面が消えるまで: " .. (ds == 0 and "消えない設定" or (ds .. " 分")))
+    end
+  end
+  local busy = watchedScreen()
+  if busy then add(false, "見送りの理由: " .. busy) end
+  add(nil, "撮影画像と診断の置き場: " .. DEBUG_SHOW)
+  return t
+end
+
+-- 結果をリポジトリに残す（公開。決まった文言と数だけ）
+local function writeHeartbeat(okN, ngN, ngLines, note)
+  local hb = io.open(REPO .. "/mac/heartbeat.txt", "w")
+  if not hb then return end
+  hb:write(string.format("last_run: %s\nversion: %s\nok: %d\nng: %d\n",
+    os.date("%Y-%m-%d %H:%M:%S"), VERSION, okN, ngN))
+  if note then hb:write("note: " .. note .. "\n") end
+  if #ngLines > 0 then
+    hb:write("failures:\n")
+    for _, line in ipairs(ngLines) do hb:write("  - " .. line .. "\n") end
+    hb:write("debug: " .. DEBUG_SHOW .. "（撮影画像と診断。非公開）\n")
+  end
+  hb:close()
+end
+
+-- 診断ファイル（Dropbox の line-dump-debug/latest.txt と日時付きの控え）。
+-- 段ごとの経過・失敗した時の画面の並び（伏せ字）・状態を書く。
+-- この Mac に頼らず、こちらで読んで直すためのもの。
+local function writeReport(title, results, extra)
+  hs.fs.mkdir(DEBUG_DIR)
+  local t = { "# LINE書き出しの診断（" .. title .. "）",
+              "time: " .. os.date("%Y-%m-%d %H:%M:%S"), "version: " .. VERSION, "" }
+  for _, r in ipairs(results or {}) do
+    t[#t + 1] = "== " .. r.name .. ": " .. (r.ok and ("OK " .. (r.note or "")) or describe(r.e, true))
+    for _, s in ipairs(r.trace or {}) do t[#t + 1] = "  ✓ " .. s.stage .. ": " .. s.text end
+    if r.e and r.e.layout then
+      t[#t + 1] = "  失敗した時の画面（伏せ字）:"
+      for _, l in ipairs(r.e.layout) do t[#t + 1] = "    " .. l end
+    end
+  end
+  for _, l in ipairs(extra or {}) do t[#t + 1] = l end
+  t[#t + 1] = ""
+  t[#t + 1] = "== 状態"
+  for _, l in ipairs(statusLines()) do t[#t + 1] = "  " .. l end
+  local text = table.concat(t, "\n") .. "\n"
+  for _, p in ipairs({ DEBUG_DIR .. "/latest.txt",
+                       DEBUG_DIR .. "/" .. os.date("%Y%m%d-%H%M%S") .. "_report.txt" }) do
+    local f = io.open(p, "w")
+    if f then f:write(text); f:close() end
+  end
+  return text
+end
+
+-- check と one の中身。段ごとの経過をコンソールに出し、診断を Dropbox に残す。
+local function tryOne(name, dry)
+  local title = dry and "確認（保存はしない）" or "1件だけ書き出す"
+  local lines = { "=== " .. title .. ": " .. name .. "（" .. VERSION .. "）===" }
+  local function out(s) lines[#lines + 1] = s end
+  local result = { name = name }
+  local function finish(alert)
+    print(table.concat(lines, "\n"))
+    writeReport(title, { result })
+    pcall(function() hs.openConsole(true) end)
+    hs.alert.show(alert, 5)
+    return result.ok == true
+  end
+  local known = false
+  for _, t in ipairs(TARGETS) do if targetName(t) == name then known = true end end
+  if not known then out("・注意: 「" .. name .. "」は TARGETS に無い（試すことはできる）") end
+  local app, err, why = prepareApp(true)
+  if not app then
+    out("✗ 準備: " .. err .. (why and "。開いたらもう一度" or ""))
+    result.e = { stage = "準備", msg = err }
+    return finish("NG: " .. err)
+  end
+  out("✓ 準備: 画面収録の許可・LINE・OCR スクリプト・保存先フォルダ")
+  if not beginRun(app) then
+    out("✗ 手が動いているので始めなかった。手を離してからもう一度")
+    result.e = { stage = "準備", msg = "手が動いていた" }
+    return finish("手が動いているので始めなかった。手を離してからもう一度")
+  end
+  local trace = {}
+  result.trace = trace
+  local okc, ok, e = pcall(exportOne, app, name, { dry = dry, trace = trace })
+  endRun()
+  for _, s in ipairs(trace) do out("✓ " .. s.stage .. ": " .. s.text) end
+  if not okc then
+    if type(ok) == "table" and ok.abort then
+      log("中断: " .. ok.abort)
+      result.e = { stage = "中断", msg = ok.abort }
+      out("✗ 中断: " .. ok.abort)
+      out("    次にすること: " .. hintFor(result.e))
+      return finish("LINE書き出しを中断: " .. ok.abort)
+    end
+    ok, e = false, { stage = "内部エラー", msg = tidy(ok) }
+  end
+  if not ok then
+    result.e = e
+    out("✗ " .. e.stage .. ": " .. e.msg)
+    if e.detail then out("    詳しく: " .. e.detail) end
+    if e.img then out("    画像: " .. e.img) end
+    out("    次にすること: " .. hintFor(e))
+    log("NG  " .. name .. "  " .. describe(e, true))
+    return finish("NG: " .. name .. "\n[" .. e.stage .. "] " .. e.msg)
+  end
+  result.ok = true
+  if dry then
+    out("=== OK: 保存ダイアログで保存名まで確かめた（保存はしていない）。" ..
+        "__LINE_EXPORT.one(\"" .. name .. "\") で本当に書き出せる ===")
+    return finish("確認OK: " .. name .. "（保存はしていない）")
+  end
+  local file = e:match("[^/]+$") or e
+  result.note = "→ " .. file
+  log("OK  " .. name .. " → " .. tidy(e))
+  local pushed = runSync()
+  out("=== OK: " .. file .. " を書き出した / " .. pushed .. " ===")
+  if pushed == "push できず" then
+    out("    push できなかった（書き出したファイルは Linetxt にある）。理由は " .. tidy(REPO) .. "/mac/sync.log")
+  end
+  return finish("書き出しOK: " .. name .. " / " .. pushed)
+end
+
+-- 1件だけ本当に書き出す。Hammerspoon コンソールから: __LINE_EXPORT.one("Berry")
+function M.one(name)
+  if not name then M.help(); return false end
+  return tryOne(name, false)
+end
+-- 1件を、保存ダイアログで保存名を確かめるところまで試す（保存はしない）: __LINE_EXPORT.check("Berry")
+function M.check(name)
+  return tryOne(name or targetName(TARGETS[1]), true)
+end
+
+-- 今日すでに書き出せたトーク。人の操作で中断した日や、新しい版でやり直す時は、
+-- 済んだものを飛ばして残りから進める（毎回1件目からだと後ろが届かない）。
+local DONE = (function()
+  local r = readResult()
+  return { day = r.day, ok = r.day == today() and r.ok or {} }
+end)()
+
+-- 全件を書き出す。auto=true は無人の自動実行。戻り値（2つ目は理由）:
+--   "done" 最後まで / "aborted" 途中で止めた（人の操作・時間切れ。やり直してよい）/
+--   "busy" 手が動いていて始めなかった / "notready" LINE を起動しただけ /
+--   "failed" 始められない（画面収録の許可が無い・保存先が無い など）
+-- busy・notready・failed はその日の回数を使わない（直れば次の確認で始める）。
+local function runExport(auto)
+  local app, err, why
+  if #TARGETS == 0 then
+    err = "TARGETS が空（line_export.lua に書き出すトークの名前を書く）"
+  else
+    app, err, why = prepareApp(not auto)
+  end
+  if not app then
+    log(err)
+    if why == "notrunning" then
+      hs.alert.show(err .. (auto and "（次の確認で実行）" or "。開いたらもう一度 ⌘⌥⌃L"), 6)
+      return "notready", err
+    end
+    -- 原因をリポジトリに残す（このMacのログを毎回見に行かなくて済むように）。
+    -- 自動実行は直るまで毎分確かめるので、同じ理由は1日1回だけ残す
+    local res = todayResult()
+    if not auto or res.failed ~= err then
+      hs.alert.show("LINE書き出し中止: " .. err, 6)
+      writeHeartbeat(0, #TARGETS, { "全件: " .. err })
+      if auto then res.failed = err; writeResult(res) end   -- 自動実行の「始められない」だけ残す
+      writeReport("始められない: " .. err, {})
+      runSync()
+    end
+    return "failed", err
+  end
+
+  if not beginRun(app, auto) then
+    log("手が動いているので始めなかった")
+    if not auto then hs.alert.show("手が動いているので始めなかった。手を離してからもう一度 ⌘⌥⌃L", 4) end
+    return "busy", "手が動いていた"
+  end
+  if DONE.day ~= today() then DONE = { day = today(), ok = {} } end
+  local okN, ngN, ngLines, stopped, results = 0, 0, {}, nil, {}
+  for i, t in ipairs(TARGETS) do
+    local name = targetName(t)
+    if auto and DONE.ok[name] then
+      okN = okN + 1; log("済み " .. name .. "（今日の前の実行で書き出し済み）")
+      goto continue
+    end
+    -- 1件の想定外エラーで残りを止めず、heartbeat も必ず書く
+    local trace = {}
+    local okc, ok, e = pcall(exportOne, app, name, { trace = trace })
+    if not okc then
+      if type(ok) == "table" and ok.abort then
+        stopped = ok.abort .. "（" .. i .. "/" .. #TARGETS .. " 件目で中断）"
+        results[#results + 1] = { name = name, ok = false, trace = trace,
+                                  e = { stage = "中断", msg = ok.abort } }
+        break
+      end
+      ok, e = false, { stage = "内部エラー", msg = tidy(ok) }
+    end
+    if ok then
+      okN = okN + 1; DONE.ok[name] = true; log("OK  " .. name .. " → " .. tidy(e))
+      results[#results + 1] = { name = name, ok = true, trace = trace, note = "→ " .. (e:match("[^/]+$") or e) }
+    else
+      ngN = ngN + 1; log("NG  " .. name .. "  " .. describe(e, true))
+      ngLines[#ngLines + 1] = name .. ": " .. describe(e)
+      results[#results + 1] = { name = name, ok = false, trace = trace, e = e }
+    end
+    wait(0.8)
+    ::continue::
+  end
+  endRun()
+  if stopped then log("中断: " .. stopped) end
+
+  -- 結果をリポジトリに残す。ログはこのMacにしか無く、失敗の理由を
+  -- 毎回コンソールから貼ってもらうのは現実的でないため、push して共有する。
+  -- 段ごとの経過と失敗した時の画面（伏せ字）・撮影画像は Dropbox に置く。
+  -- 途中で止めた時は、前に最後まで回った時の失敗数と版を残す（新しい版でのやり直しの目安）
+  -- 日付は始めた日（日をまたいで終わっても、次の日の分にしない）。始められたので
+  -- 「始められない」の印は消す
+  local res = readResult()
+  if res.day ~= DONE.day then res = { day = DONE.day, version = "", ng = 0, ok = {} } end
+  if stopped then
+    res.ok, res.stopped, res.failed = DONE.ok, stopped, nil
+  else
+    res = { day = DONE.day, version = VERSION, ng = ngN, ok = DONE.ok }
+  end
+  writeResult(res)
+  writeHeartbeat(okN, ngN, ngLines, stopped and ("中断: " .. stopped))
+  writeReport((auto and "自動実行" or "手動実行") .. (stopped and "・中断" or ""), results)
+
+  local pushed = runSync()
+  hs.alert.show(string.format("LINE書き出し OK:%d NG:%d%s / %s", okN, ngN,
+    stopped and (" 中断") or "", pushed), 4)
+  if not auto and (ngN > 0 or stopped or pushed == "push できず") then
+    pcall(function() hs.openConsole(true) end)
+  end
+  return stopped and "aborted" or "done", stopped or (ngN .. " 件失敗")
+end
+
+-- 画面の読み取り診断: 今の LINE の窓を撮って、読めた文字を位置と領域つきで
+-- 伏せ字で出す（TARGETS の名前と LINE の決まった表示以外は ■n字）。
+-- 窓だけを撮るので LINE を前に出さない（コンソールが隠れない）。何も押さない。
+-- quiet=true は自動の診断（コンソールを開かない・通知を出さない）。
+function M.diag(quiet)
+  local lines = {}
+  local function out(s) lines[#lines + 1] = s end
+  local function finish(alert)
+    if not quiet then
+      print(table.concat(lines, "\n"))
+      pcall(function() hs.openConsole(true) end)
+      if alert then hs.alert.show(alert, 4) end
+    end
+    writeReport(quiet and "自動の診断" or "診断", {}, lines)
+  end
+  local app = hs.application.find(LINE_BUNDLE)
+  if not app then out("LINE が起動していない"); return finish("LINE が起動していない") end
+  local win = findMain(app, true) or (not quiet and (app:focusedWindow() or app:mainWindow())) or nil
+  if not win then
+    out("LINE の窓が見えない（最小化中なら戻さない。LINE を開いておく）")
+    return finish("LINE の窓が見えない")
+  end
+  local cap = capture(win, "diag")
+  local items, oerr = ocr(cap)
+  if not items then out("OCR 診断: " .. tostring(oerr)); return finish(oerr) end
+  local f = win:frame()
+  local field, ff = searchField(win)
+  local paneX, how
+  if ff then paneX, how = listRight(win, ff) end
+  out("=== LINE 診断（" .. VERSION .. "。伏せ字: TARGETS の名前と LINE の決まった表示以外は ■n字）===")
+  out(string.format("画面収録: %s / 窓 x=%.0f y=%.0f w=%.0f h=%.0f / 読めた文字 %d 件",
+    screenRecordingOK() and "許可" or "未許可", f.x, f.y, f.w, f.h, #items))
+  if ff then
+    out(string.format("検索欄 x=%.0f〜%.0f y=%.0f（中身: %s）", ff.x, ff.x + ff.w, ff.y + ff.h / 2,
+      masked(attr(field, "AXValue") or "")))
+    out(string.format("一覧とトーク欄の境目 x=%.0f（%s）", paneX, how))
+    local hrow = headerRow(items, paneX, f, win:title(), ff)
+    out(headerSeen(hrow))
+    if hrow then
+      out(string.format("⋮ を押す位置（推定）x=%.0f y=%.0f", f.x + f.w - L.MENU_FROM_RIGHT, hrow[1].y))
+    end
+    out("TARGETS が今の一覧に見えるか:")
+    local cells = rowsByAX(win, paneX, ff.y + ff.h)
+    for _, t in ipairs(TARGETS) do
+      local name = targetName(t)
+      local tn, where = norm(name), nil
+      for _, it in ipairs(items) do
+        if not where and it.x < paneX and it.y > ff.y + ff.h and score(tn, it.n) == 3 then where = it end
+      end
+      for _, c in ipairs(cells) do
+        if not where and score(tn, c.n) == 3 then where = c end
+      end
+      out(where and string.format("  ✓ %s（y=%.0f）", name, where.y)
+                or ("  ・" .. name .. " は見えない（書き出す時は検索する）"))
+    end
+  else
+    out("検索欄が見つからない（LINE のトークの一覧を出しておく）")
+  end
+  out("読めた文字（伏せ字）:")
+  for _, l in ipairs(layoutLines(items, ff, paneX, 40)) do out("  " .. l) end
+  local img = keepDebug("diag", "screen", cap, win)
+  out("=== ここまで（このまま貼っても会話の中身は出ません。画像は " .. (img or "保存できず") .. "）===")
+  finish("診断をコンソールに出した（伏せ字）")
+end
+
+function M.status()
+  print("=== LINE書き出し 状態 ===\n" .. table.concat(statusLines(), "\n"))
+  pcall(function() hs.openConsole(true) end)
+end
+
+function M.help()
+  print(table.concat({
+    "=== LINE書き出し の使い方（" .. VERSION .. "）===",
+    "  ふだんは何もしなくてよい。毎日 " .. RUN_AT .. " 以降、Mac を " .. IDLE_REQUIRED // 60 ..
+      " 分以上触っていない時（画面ロック中は除く）に自動で書き出して push する。",
+    "  1回の実行は " .. RUN_LIMIT_MIN .. " 分まで（固まったら止める）。",
+    "  失敗したら撮影画像と診断（伏せ字）を " .. DEBUG_SHOW .. " に残す。",
+    "",
+    "  __LINE_EXPORT.status()        今の状態と、自動実行が走らない理由",
+    "  __LINE_EXPORT.check(\"Berry\")  1件を保存ダイアログで保存名を確かめるところまで試す（保存しない）",
+    "  __LINE_EXPORT.one(\"Berry\")    1件だけ本当に書き出して push",
+    "  __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）",
+    "  __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）",
+    "  __LINE_EXPORT.update()        最新の版にする（git pull して、うまくいった時だけ読み込み直す）",
+    "  ⌘⌥⌃L 全件を今すぐ書き出す（⇧ 版でも可）",
+    "  止めたいとき: マウスを動かすかキーを押す",
+    "  status / check / one / diag の画面の文字は伏せ字（TARGETS の名前と LINE の決まった表示以外は ■n字）",
+  }, "\n"))
+  pcall(function() hs.openConsole(true) end)
+end
+
+-- 最新の版にする。git pull して、うまくいった時だけ読み込み直す（手で打った時だけ動く）。
+function M.update()
+  local out, ok = hs.execute("git -C " .. sh(REPO) .. " pull --ff-only -q origin main 2>&1", true)
+  if not ok then
+    print("=== 最新にできなかった（git pull に失敗。読み込み直していない）===\n" .. tidy(out or "") ..
+      "\n手元で TARGETS などを書き換えたままだと失敗する。ターミナルで cd " .. tidy(REPO) ..
+      " && git status を見る（分からなければ、この表示を Claude に見せる）")
+    pcall(function() hs.openConsole(true) end)
+    hs.alert.show("最新にできなかった（コンソールを見る）", 5)
+    return false
+  end
+  print("=== 最新にした。読み込み直す ===")
+  hs.reload()
+  return true
+end
+
+-- トーク名の一覧（TARGETS に貼るため）。一覧の列の行だけを読む（トーク欄の
+-- メッセージも AX のセルなので、範囲を絞らないと会話の中身まで出てしまう）。
+-- 表示中の行しか取れないので、全部欲しければリストをスクロールしてからもう一度。
+function M.names()
+  local app = hs.application.find(LINE_BUNDLE)
+  if not app then hs.alert.show("LINEが見つからない", 3); return end
+  app:activate(true); wait(0.4)
+  local win = findMain(app)
+  local ff
+  if win then ff = select(2, searchField(win)) end
+  if not ff then hs.alert.show("LINE のトークの一覧（検索欄のある画面）を出しておく", 4); return end
+  local paneX = listRight(win, ff)
+  local names, seen, wf = {}, {}, win:frame()
+  for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
+                               function(e) return role(e) == "AXCell" end, 6000)) do
+    local r = axFrame(cell)
+    if r and r.x + r.w / 2 < paneX and r.y > ff.y + ff.h and r.y + r.h / 2 < wf.y + wf.h then
+      local t = bfs(cell, function(e)
+        return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
+      end, 40)
+      local v = t and tostring(attr(t, "AXValue"))
+      if v and not seen[v] then seen[v] = true; names[#names + 1] = v end
+    end
+  end
+  -- TARGETS に貼るための一覧なので、トーク名は伏せ字にしない（会話の中身は出さない）
+  print("=== LINE トーク一覧 " .. #names .. "件（TARGETS にそのまま貼れる形式）===")
+  for _, n in ipairs(names) do print(string.format('  "%s",', n)) end
+  print("=== ここまで。表示中の行のみ。足りなければリストをスクロールして再度 ⌘⌥⌃J ===")
+  pcall(function() hs.openConsole(true) end)
+  hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
+  return names
+end
+
+-- ---------- 毎日の自動実行 ----------
+local skipLogged = {}
+local function checked(why) M.lastCheck = { at = os.time(), why = why } end
+-- 今日の heartbeat をもう書いたか（昼の「見送り中」を、読み込み直しても1日1回にする）
+local function heartbeatToday()
+  return (readAll(REPO .. "/mac/heartbeat.txt") or ""):find("last_run: " .. os.date("%Y-%m-%d"), 1, true) ~= nil
+end
 local function maybeRun()
   local day = today()
   local stateDay, aborts = readState()
-  if stateDay == day and (aborts == nil or aborts >= MAX_ABORTS) then return end
+  local before = (readAll(STATE_PATH) or ""):gsub("%s", "")   -- 始められなかった時に戻す
+  local retry = false
+  if stateDay == day and (aborts == nil or aborts >= MAX_ABORTS) then
+    -- 今日は済み。ただし新しい版が入った日は、失敗していた分をもう一度試す（版ごとに1回）
+    local res = readResult()
+    if aborts == nil and res.day == day and res.ng > 0 and res.version ~= VERSION then
+      retry = true
+    else
+      return checked(aborts == nil and "今日は済み" or ("今日は " .. aborts .. " 回中断したので、自動ではもうやらない"))
+    end
+  end
 
   local hh, mm = RUN_AT:match("^(%d+):(%d+)$")
   local t = os.date("*t")
-  if t.hour * 60 + t.min < tonumber(hh) * 60 + tonumber(mm) then return end
+  if t.hour * 60 + t.min < tonumber(hh) * 60 + tonumber(mm) then return checked(RUN_AT .. " より前") end
 
-  -- ロック中・スクリーンセーバ中はクリックが通らない
-  if screenLocked() then return end
-  -- 操作中に割り込むと、クリックを奪い合って失敗する上に邪魔になる
-  if idleSeconds() < IDLE_REQUIRED then return end
-  local busy = watchedScreen()
-  if busy then
-    if not skipLogged[day .. busy] then skipLogged[day .. busy] = true; log("見送り: " .. busy) end
-    -- 昼になっても見送りが続く日は、理由を heartbeat に残す（GitHub から見て
-    -- 走らなかった理由が分かるように。1日1回）
-    if t.hour >= 12 and not skipReported[day] then
-      skipReported[day] = true
-      writeHeartbeat(0, 0, {}, "見送り中: " .. busy)
+  -- ロック中・スクリーンセーバ中はクリックが通らない。操作中に割り込むと、
+  -- クリックを奪い合って失敗する上に邪魔になる。画面を見ている人がいそうな時も見送る。
+  local why
+  if screenLocked() then
+    why = "画面がロック中"
+  else
+    local idle = idleSeconds()
+    if idle < IDLE_REQUIRED then
+      why = string.format("使用中（無操作 %.0f 秒。%d 秒で始める）", idle, IDLE_REQUIRED)
+    else
+      why = watchedScreen()
+      if why and not skipLogged[day .. why] then skipLogged[day .. why] = true; log("見送り: " .. why) end
+    end
+  end
+  if why then
+    -- 昼になっても走れていない日は、理由を heartbeat に残す（GitHub から見て
+    -- 走らなかった理由が分かるように。今日の heartbeat がまだ無い時だけ＝1日1回）
+    if t.hour >= 12 and stateDay ~= day and not heartbeatToday() then
+      writeHeartbeat(0, 0, {}, "見送り中: " .. why)
+      writeReport("見送り中: " .. why, {})
       runSync()
     end
-    return
+    return checked(why)
   end
 
   -- 実行中の再入と、失敗時の一日中のリトライを防ぐため先に記録する
   writeState(day)
+  checked(retry and "新しい版で失敗分のやり直しを開始" or "自動実行を開始")
+  if retry then log("新しい版（" .. VERSION .. "）が入ったので、今日失敗した分をもう一度試す") end
   log("自動実行を開始（" .. os.date("%H:%M") .. "）")
-  local r = runExport(true)
+  local okr, r, detail = pcall(runExport, true)
+  if not okr then
+    -- 想定外のエラー（書き出しの外側）。今日を済みにせず、次の確認でやり直す
+    if RUN then endRun() end
+    log("error: 自動実行で想定外のエラー: " .. tidy(r))
+    r, detail = "failed", "想定外のエラー"
+  end
   if r == "aborted" then
-    -- 人が戻ってきて止めた日は、また離席したらやり直す（上限あり）
+    -- 人が戻ってきて止めた・時間切れの日は、また離席したらやり直す（上限あり）
     writeState(day .. ":" .. ((stateDay == day and aborts or 0) + 1))
-  elseif r == "notready" then
-    -- LINE を起動しただけ。その日の回数は使わずに次の確認でやり直す
-    writeState(stateDay == day and (day .. ":" .. (aborts or 0)) or "")
+    checked("中断: " .. tostring(detail))
+  elseif r == "done" then
+    checked("自動実行: 最後まで（" .. tostring(detail) .. "）")
+  else
+    -- 始められなかった（LINE を起動しただけ・手が動いていた・画面収録の許可が無い など）。
+    -- その日の回数は使わず、元の状態に戻して次の確認でやり直す
+    writeState(before)
+    checked((r == "notready" and "LINE を起動した（次の確認で始める）")
+         or (r == "busy" and "手が動いていたので始めなかった")
+         or ("始められない: " .. tostring(detail)))
+  end
+end
+
+-- 二重読み込み対策。init.lua に dofile 行が複数入っていたり、Reload を
+-- 繰り返したりしても、タイマーとホットキーが多重にならないようにする
+-- （多重になると 07:00 に自動操作が同時に2本走り、LINE の画面を奪い合う）。
+if _G.__LINE_EXPORT then
+  local prev = _G.__LINE_EXPORT
+  for _, k in ipairs({ "timer", "waker", "wakeTimer", "diagTimer" }) do
+    if prev[k] then pcall(function() prev[k]:stop() end) end
+  end
+  for _, hk in ipairs(prev.hotkeys or {}) do pcall(function() hk:delete() end) end
+  log("前回の読み込み分を解除して張り直します")
+end
+_G.__LINE_EXPORT = M
+M.hotkeys = {}
+
+-- Ctrl版・Shift版の両方に割り当てる。以前ここは ⌘⌥⌃ を使う別スクリプトと
+-- 競合していたため一度 Shift に逃がしたが、そちらを無効化した後も
+-- 手が Ctrl を覚えているはずなので、どちらを押しても動くようにしておく。
+local function bindBoth(k, fn)
+  for _, mods in ipairs({{"cmd","alt","ctrl"}, {"cmd","alt","shift"}}) do
+    M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(mods, k, fn)
   end
 end
 
@@ -1294,60 +2053,47 @@ M.waker = hs.caffeinate.watcher.new(function(ev)
   local w = hs.caffeinate.watcher
   if ev == w.systemDidWake or ev == w.screensDidUnlock
      or ev == w.sessionDidBecomeActive then
-    hs.timer.doAfter(120, maybeRun)   -- 復帰直後は落ち着くまで少し待つ
+    -- 復帰直後は落ち着くまで少し待つ（タイマーは M に持たせる。持たないと
+    -- ガベージコレクションで消えて発火しないことがある）
+    M.wakeTimer = hs.timer.doAfter(120, maybeRun)
   end
 end)
 M.waker:start()
 
 bindBoth("L", function() runExport(false) end)               -- 手動実行
-bindBoth("K", function() M.diag() end)                        -- OCR 診断
+bindBoth("K", function() M.diag() end)                        -- 画面の読み取り診断
 
-bindBoth("J", function()                                      -- トーク名を一括取得
-  local app = hs.application.find(LINE_BUNDLE)
-  if not app then hs.alert.show("LINEが見つからない", 3); return end
-  app:activate(true); hs.timer.usleep(400000)
-  local win = findMain(app) or app:focusedWindow() or app:mainWindow()
-  if not win then hs.alert.show("LINEウィンドウ無し", 3); return end
-
-  -- トークリストの行は AX で取れる（⋮ と違ってツリーに乗っている）。
-  -- ただし表示中の行しか取れないので、全部欲しければリストをスクロールしてから押す。
-  local names, seen = {}, {}
-  for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
-                               function(e) return role(e) == "AXCell" end, 6000)) do
-    local t = bfs(cell, function(e)
-      return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
-    end, 40)
-    if t then
-      local v = tostring(attr(t, "AXValue"))
-      if not seen[v] then seen[v] = true; names[#names + 1] = v end
-    end
-  end
-
-  print("=== LINE トーク一覧 " .. #names .. "件（TARGETS にそのまま貼れる形式）===")
-  for _, n in ipairs(names) do
-    print(string.format('  "%s",', n))
-  end
-  print("=== ここまで。表示中の行のみ。足りなければリストをスクロールして再度 ⌘⌥⇧J ===")
-  hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
-end)
+bindBoth("J", function() M.names() end)                       -- トーク名を一括取得
 
 -- テスト用（mac/tests/test_line_export.lua から中身を検証する）
 M._t = {
-  norm = norm, score = score, loose = loose, isSaveLabel = isSaveLabel,
-  nameMatches = nameMatches,
+  norm = norm, score = score, loose = loose, isSaveLabel = isSaveLabel, countless = countless,
+  nameMatches = nameMatches, masked = masked, maskedSave = maskedSave,
   pngSize = pngSize, ocr = ocr, capture = capture, stampedName = stampedName,
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
+  statusLines = statusLines, readResult = readResult,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,
+  VERSION = VERSION,
 }
 
-_G.__LINE_EXPORT = M
+-- 読み込んだ版を残す。新しい版を初めて読み込んだ時は、何も押さない診断を
+-- 1回だけ自動で撮っておく（直した版で画面がどう読めるかを、こちらで見るため）。
+local prevLoaded = (readAll(LOADED_PATH) or ""):gsub("%s", "")
+if prevLoaded ~= VERSION then
+  local f = io.open(LOADED_PATH, "w")
+  if f then f:write(VERSION .. "\n"); f:close() end
+  M.diagTimer = hs.timer.doAfter(30, function()
+    if not RUN and _G.__LINE_EXPORT == M and not screenLocked() and not watchedScreen() then
+      pcall(M.diag, true)
+    end
+  end)
+end
 
 if not screenRecordingOK() then
-  log("warn: Hammerspoon に「画面収録」が許可されていない。v4 は画面を読むので必須" ..
+  log("warn: Hammerspoon に「画面収録」が許可されていない。画面を読むので必須" ..
       "（システム設定 → プライバシーとセキュリティ → 画面とシステムオーディオ録音）")
 end
-log(string.format(
-  "読込完了 v4 / 対象%d件 / %s以降 離席中に自動実行 / 手動 ⌘⌥⌃L(⇧も可) / OCR診断 ⌘⌥⌃K / 一覧 ⌘⌥⌃J / 止める: マウスを動かす",
-  #TARGETS, RUN_AT))
+log(string.format("読込完了 %s / 対象%d件 / %s以降 離席中に自動実行 / 使い方: __LINE_EXPORT.help()",
+  VERSION, #TARGETS, RUN_AT))
 return M

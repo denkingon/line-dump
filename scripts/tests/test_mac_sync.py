@@ -80,26 +80,36 @@ class TestSyncSh(unittest.TestCase):
         shot = self.work / "mac/debug/20261020-070312_Berry_トーク確認.png"
         shot.parent.mkdir(parents=True)
         shot.write_bytes(b"\x89PNG\r\n\x1a\n")
-        (self.work / "mac/stray.jpg").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (self.work / "mac/stray.gif").write_bytes(b"GIF89a")
         before = self.origin_log()
         r = self.sync()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("画像ファイル", r.stdout)
-        self.assertIn("mac/stray.jpg", r.stdout)
+        self.assertIn("mac/stray.gif", r.stdout)
         self.assertEqual(self.origin_log(), before, "何も push していない")
         self.assertEqual(self.git("diff", "--cached", "--name-only"), "", "index も元に戻した")
         self.assertNotIn("debug", r.stdout, "mac/debug/ は .gitignore で最初から入らない")
 
     def test_refuses_images_with_japanese_names(self):
         # 日本語名は git の通常の出力だと "..." で囲まれる。それでも見逃さない
-        for name in ("mac/トーク画面.jpg", "写真 1.HEIC"):
+        for name in ("mac/トーク画面.gif", "写真 1.HEIC"):
             (self.work / name).write_bytes(b"x")
         before = self.origin_log()
         r = self.sync()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("mac/トーク画面.jpg", r.stdout)
+        self.assertIn("mac/トーク画面.gif", r.stdout)
         self.assertIn("写真 1.HEIC", r.stdout)
         self.assertEqual(self.origin_log(), before, "何も push していない")
+
+    def test_jpg_and_png_are_never_committed(self):
+        # 撮影画像（line_export.lua は JPEG で残す）は .gitignore で最初から入らない
+        (self.work / "mac/20261023-070312_Berry_トーク確認.jpg").write_bytes(b"\xff\xd8\xff")
+        (self.work / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = self.sync()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        files = self.git("--git-dir", str(self.origin), "ls-tree", "-r", "--name-only", "main", cwd=self.tmp)
+        self.assertNotIn(".jpg", files)
+        self.assertNotIn(".png", files)
 
     def test_refuses_to_run_off_main(self):
         self.git("checkout", "-q", "-b", "try-v4")

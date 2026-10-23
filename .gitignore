@@ -9,9 +9,13 @@ mac/sync.log
 mac/calibration.lua
 
 # 撮影画像（トーク画面が写るので絶対に push しない）。line_export.lua は
-# ~/Library/Logs/line-dump/debug に置くが、念のためリポジトリ内も除外する
+# Dropbox の Backups/line-dump-debug に置くが、念のためリポジトリ内も除外する
+# （sync.sh も画像が commit に入りそうになったら push せずに止まる）
 mac/debug/
 *.png
+*.jpg
 
-# Mac ごとの実行状態（いつ走ったか。環境依存なので共有しない）
+# Mac ごとの実行状態（いつ走ったか・今日の結果・読み込んだ版。環境依存なので共有しない）
 mac/.last_run
+mac/.last_result
+mac/.loaded_version
