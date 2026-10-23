@@ -68,7 +68,9 @@ local function layout()
   local fieldAX = k.narrowField and { x = field.x, y = field.y, w = k.narrowField == true and 150 or k.narrowField, h = field.h } or field
   return {
     field = field, fieldAX = fieldAX,
-    rowY = function(i) return field.y + field.h + 40 + (i - 1) * 64 end,
+    -- 一覧はスクロールできる（listScroll）。listTop より上に来た行は見えない
+    rowY = function(i) return field.y + field.h + 40 + (i - 1) * 64 - (W.listScroll or 0) end,
+    listTop = field.y + field.h + 20,
     rowX = field.x + 130,
     header = { x = f.x + 430, y = hy },
     dots = { x = f.x + f.w - 24 + (k.menuDX or 0), y = hy + (k.menuDY or 0) },
@@ -114,8 +116,12 @@ local function visibleTexts(screen)
     end
   end
   for i, c in ipairs(results()) do
+    if L.rowY(i) < L.listTop then goto hidden end
     if not W.knobs.ocrDropRows then add(c.ocrRow or c.name, L.rowX, L.rowY(i)) end
     add(c.preview or "最後のメッセージ", L.rowX, L.rowY(i) + 18)
+    -- 行の右上に最後のメッセージの時刻（実機と同じく名前より少し上）
+    if not W.knobs.noRowTimes then add(c.time or "12:34", L.field.x + 250, L.rowY(i) - 9) end
+    ::hidden::
   end
   if W.open then
     local c = chat(W.open) or { name = W.open }
@@ -225,7 +231,8 @@ local function click(pt)
     return
   end
   for i, c in ipairs(results()) do
-    if math.abs(pt.y - L.rowY(i)) < 28 and pt.x > L.field.x - 60 and pt.x < L.field.x + L.field.w + 10 then
+    if L.rowY(i) >= L.listTop and math.abs(pt.y - L.rowY(i)) < 28
+       and pt.x > L.field.x - 60 and pt.x < L.field.x + L.field.w + 10 then
       W.open = opened(c); W.openedAt = T
       W.openLog[#W.openLog + 1] = c.name
       W.focus = "input"
@@ -345,7 +352,7 @@ local function winEl()
       local pane = el({ AXRole = "AXGroup", AXChildren = paneKids })
       local cells = {}
       for i, c in ipairs(results()) do
-        if c.noAX then goto skip end
+        if c.noAX or L.rowY(i) < L.listTop then goto skip end
         cells[#cells + 1] = el(frameAttrs({ AXRole = "AXCell", AXChildren = {
           el(frameAttrs({ AXRole = "AXStaticText", AXValue = c.name },
                         { x = L.field.x - 30, y = L.rowY(i) - 10, w = 220, h = 20 })),
@@ -519,7 +526,14 @@ hs = {
   },
   -- 本物と同じく 2^30 ns（約1.07秒）刻みの整数（切り捨て）
   host = { idleTime = function() return math.floor((T - W.lastHID) * 1e9 / 2^30) end },
-  mouse = { absolutePosition = function() return { x = W.mouse.x, y = W.mouse.y } end },
+  mouse = { absolutePosition = function(pt)
+    if pt then                                      -- マウスを動かす（自動の操作）
+      W.mouse = { x = pt.x, y = pt.y }; W.mouseMoves = (W.mouseMoves or 0) + 1
+      if not W.knobs.synthNoReset then W.lastHID = T end
+      return
+    end
+    return { x = W.mouse.x, y = W.mouse.y }
+  end },
   hotkey = { bind = function() return { delete = function() end } end },
   alert = { show = function(s) W.alerts[#W.alerts + 1] = s end },
   geometry = { point = function(x, y) return { x = x, y = y } end },
@@ -535,6 +549,23 @@ hs = {
         if W.knobs.frontLostAfterPaste then W.knobs.frontIsOther = true end
       end
       if k == "right" and W.sheet and W.focus == "sheet" then W.sheet.cursorEnd = true end
+      if k == "delete" then
+        if W.focus == "search" then W.search = ""
+        elseif W.focus == "input" then W.draft = "（入力欄で delete を押した）" end
+      end
+    end,
+    -- ホイール（正は上へ）。マウスが一覧の上にある時だけ一覧が動く
+    scrollWheel = function(off, mods, unit)
+      W.scrolls = (W.scrolls or 0) + 1
+      if W.knobs.userActsAtScroll == W.scrolls then W.pendingUser = "key" end
+      if not W.knobs.synthNoReset then W.lastHID = T end
+      if W.knobs.frontIsOther then W.scrolledElsewhere = true; return end
+      local L = layout()
+      if W.mouse.x > L.field.x - 60 and W.mouse.x < L.field.x + L.field.w + 10 and W.mouse.y > L.listTop then
+        local n = #results()
+        local maxScroll = math.max(0, n * 64 + 60 - (W.win.y + W.win.h - L.listTop))
+        W.listScroll = math.max(0, math.min(maxScroll, (W.listScroll or 0) - off[2]))
+      end
     end,
     keyStrokes = function(s)
       W.keys[#W.keys + 1] = "type:" .. s
@@ -1410,6 +1441,89 @@ test("OCR が動かなければ「OCR」の段で止める（別トーク扱い�
   local ok, e = exportOne("Berry")
   check(not ok and e.stage == "OCR", "OCR で失敗: " .. tostring(e and e.stage))
   check(e.detail and e.detail:find("Vision", 1, true), "osascript のエラーは detail に: " .. tostring(e.detail))
+  safe()
+end)
+
+-- ===================== 今のトーク名を集める =====================
+local function namesTxt() return readfile(DEBUG .. "/names.txt") or "" end
+
+test("書き出しの前に一覧を上から下まで読んで今のトーク名を集め、names.txt に名前だけを書く", function()
+  local list = {}
+  for i = 1, 40 do list[#list + 1] = { name = "トーク" .. i .. "番", preview = "秘密のメッセージ" .. i } end
+  list[#list + 1] = { name = "Berry", preview = "秘密のメッセージB" }
+  reset({ chats = list })
+  W.search = "前の検索"; W.listScroll = 0
+  local M = load(); W.logs = {}
+  M.check("Berry")
+  local nt = namesTxt()
+  local all = true
+  for i = 1, 40 do if not nt:find("\nトーク" .. i .. "番\n", 1, true) then all = false end end
+  check(all and nt:find("\nBerry\n", 1, true), "41件とも集めた:\n" .. nt)
+  check(not nt:find("秘密", 1, true), "最後のメッセージは書かない")
+  check(nt:find("Berry → Berry（同じ名前）", 1, true), "TARGETS → 今の名前:\n" .. nt)
+  check((W.scrolls or 0) >= 3 and (W.listScroll or 0) == 0, "スクロールして読み、一番上に戻した（" .. tostring(W.scrolls) .. " 回）")
+  check(W.saved == nil and W.cancelled, "check なので保存していない")
+  safe()
+end)
+
+test("名前が少し変わったトーク（今の名前に記号が足された）を、今の名前で探して書き出す", function()
+  reset({ chats = chats({ "直承Jikisho", "il 石川ありがとう!" }) })
+  local M = load(); W.logs = {}
+  local ok = M.one("il 石川ありがとう")
+  check(ok and W.saved and W.saved:find("[LINE]il 石川ありがとう!_", 1, true), "今の名前で保存: " .. tostring(W.saved))
+  local nt = namesTxt()
+  check(nt:find("il 石川ありがとう → il 石川ありがとう!（近さ", 1, true), "names.txt に結び付けを書く:\n" .. nt)
+  local out = table.concat(W.logs, "\n")
+  check(out:find("✓ 名前: 今の一覧では 〈il 石川ありがとう〉＋1字", 1, true), "結び付けた今の名前を出す:\n" .. out)
+  safe()
+end)
+
+test("名前の絵文字を OCR が別の字に読んでも、一覧の名前から結び付けて書き出す（AX に無い行）", function()
+  reset({ chats = { { name = "パプリカ定例会議" },
+                    { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } })
+  local M = load(); W.logs = {}
+  local ok = M.one("パプリカ")
+  check(ok and W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ を保存: " .. tostring(W.saved))
+  check(not table.concat(W.openLog, ","):find("定例", 1, true), "別のトークは開いていない: " .. table.concat(W.openLog, ","))
+  check(namesTxt():find("パプリカ》\t（OCR で読んだ文字）", 1, true), "OCR で読んだ名前だと分かるように書く:\n" .. namesTxt())
+  safe()
+end)
+
+test("似ているだけの名前（村田研 と 村田研OB会）は結び付けず、names.txt に一番近い名前を書く", function()
+  reset({ chats = chats({ "直承Jikisho", "村田研OB会" }) })
+  local M = load(); W.logs = {}
+  local ok = M.one("村田研")
+  check(not ok and not W.saved, "書き出さない")
+  check(namesTxt():find("村田研 → 決められない（一番近い: 村田研OB会 0.75）", 1, true), "一番近い名前:\n" .. namesTxt())
+  safe()
+end)
+
+test("名前を集めている時に人が触ったら、全体を止めて何も開かない", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { userActsAtScroll = 2 } })
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  local r = M._t.runExport()
+  check(r == "aborted", "中断: " .. tostring(r))
+  check(#W.openLog == 0 and not W.saved, "何も開いていない")
+  check(heartbeat():find("中断", 1, true), "heartbeat に中断:\n" .. heartbeat())
+end)
+
+test("検索欄にフォーカスが入らない時は、キーを送らずに AX で消してから名前を集める", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { focusIgnored = true, clickNoFocus = true } })
+  W.search = "前の検索"
+  local M = load(); W.logs = {}
+  M.check("Berry")
+  check(W.draft == nil, "入力欄に何も打っていない・消していない: " .. tostring(W.draft))
+  check(namesTxt():find("\nBerry\n", 1, true), "名前を集めた:\n" .. namesTxt())
+  safe()
+end)
+
+test("フルスクリーン（AX が 30pt 下）でも名前を集めて書き出す", function()
+  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { axDY = 30 } })
+  W.search = "前の検索"
+  local M = load(); W.logs = {}
+  local ok = M.one("Berry")
+  check(ok and W.saved and namesTxt():find("\nBerry\n", 1, true), "集めて書き出した:\n" .. namesTxt())
   safe()
 end)
 
