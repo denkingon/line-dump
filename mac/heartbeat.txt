@@ -1,5 +1,12 @@
-last_run: 2026-10-23 23:46:17
+last_run: 2026-10-23 23:47:43
 version: v4.1-db9df449
 ok: 0
-ng: 0
-note: 中断: 人の操作を検知（今のトーク名を集めている時に中断）
+ng: 5
+note: 中断: 人の操作を検知（6/13 件目で中断）
+failures:
+  - オーチュー/小林央忠: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-234648_オーチュー_小林央忠_トーク選択.jpg）
+  - 3日後 ハートランド: [クリック] 押す所に LINE 以外の物が重なっている（画像: Dropbox の Backups/line-dump-debug/20261023-234700_3日後 ハートランド_クリック.jpg）
+  - かにっこにー: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-234709_かにっこにー_トーク選択.jpg）
+  - 山脇開生: [クリック] 押す所に LINE 以外の物が重なっている（画像: Dropbox の Backups/line-dump-debug/20261023-234721_山脇開生_クリック.jpg）
+  - Berry: [クリック] 押す所に LINE 以外の物が重なっている（画像: Dropbox の Backups/line-dump-debug/20261023-234732_Berry_クリック.jpg）
+debug: Dropbox の Backups/line-dump-debug（撮影画像と診断。非公開）
