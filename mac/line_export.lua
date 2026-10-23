@@ -1570,7 +1570,9 @@ local function statusLines()
   add(nil, "最後の確認: " .. (M.lastCheck and (os.date("%H:%M", M.lastCheck.at) .. " " .. M.lastCheck.why)
                                           or "まだ（読み込んだ直後）"))
   local okn, nt = pcall(function() return M.timer and M.timer:nextTrigger() end)
-  if okn and type(nt) == "number" then add(nil, string.format("次の確認: 約 %d 秒後", math.floor(nt))) end
+  if okn and type(nt) == "number" then
+    add(nil, nt > 1 and string.format("次の確認: 約 %d 秒後", math.floor(nt)) or "次の確認: まもなく")
+  end
   add(nil, string.format("今の無操作時間: %.0f 秒", idleSeconds()))
   local locked = screenLocked()
   add(not locked, "画面ロック: " .. (locked and "中（ロック中は自動実行しない）" or "なし"))
@@ -1833,7 +1835,17 @@ function M.diag(quiet)
   if not app then out("LINE が起動していない"); return finish("LINE が起動していない") end
   local win = findMain(app, true) or (not quiet and (app:focusedWindow() or app:mainWindow())) or nil
   if not win then
-    out("LINE の窓が見えない（最小化中なら戻さない。LINE を開いておく）")
+    -- 見えない理由を分けて出す（実機で「見えない」とだけ出て、原因が分からなかった）
+    local all = (pcall(function() return app:allWindows() end) and app:allWindows()) or {}
+    local mini = 0
+    for _, w in ipairs(all) do if w:isMinimized() then mini = mini + 1 end end
+    local okh, hidden = pcall(function() return app:isHidden() end)
+    local why = (okh and hidden) and "LINE が隠されている（⌘H）"
+             or (#all == 0) and "この画面（デスクトップ）に LINE の窓が無い（窓を閉じたか、フルスクリーンで別の画面にある）"
+             or (mini == #all) and "LINE の窓が最小化されている"
+             or "LINE の窓に検索欄が見つからない（トークの一覧の画面ではない）"
+    out("LINE の窓が見えない: " .. why .. "（窓 " .. #all .. " 個・最小化 " .. mini .. " 個）")
+    out("書き出しの時は LINE を前に出して開き直すので、多くの場合はそのままで動く")
     return finish("LINE の窓が見えない")
   end
   local cap = capture(win, "diag")
@@ -2046,6 +2058,7 @@ local function maybeRun()
     -- 昼になっても走れていない日は、理由を heartbeat に残す（GitHub から見て
     -- 走らなかった理由が分かるように。今日の heartbeat がまだ無い時だけ＝1日1回）
     if t.hour >= 12 and stateDay ~= day and not heartbeatToday() then
+      checked(why)                                -- 診断ファイルの「最後の確認」にこの理由を出す
       writeHeartbeat(0, 0, {}, "見送り中: " .. why)
       writeReport("見送り中: " .. why, {})
       runSync()

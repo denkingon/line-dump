@@ -366,7 +366,7 @@ end
 local screenObj = { frame = function() return { x = SCREEN.x, y = SCREEN.y, w = SCREEN.w, h = SCREEN.h } end }
 local winObj = {
   frame = function() return { x = W.win.x, y = W.win.y, w = W.win.w, h = W.win.h } end,
-  isVisible = function() return W.win.visible end,
+  isVisible = function() return W.win.visible and not W.knobs.appHidden end,   -- 本物も隠したアプリの窓は見えない扱い
   isMinimized = function() return W.win.minimized end,
   unminimize = function() W.win.minimized = false; W.win.visible = true end,
   id = function() return 42 end,
@@ -392,6 +392,7 @@ local appObj = {
     return W.win.visible and winObj or nil
   end,
   mainWindow = function() return W.win.exists and winObj or nil end,
+  isHidden = function() return W.knobs.appHidden == true end,
   activate = function()
     if W.knobs.userActsAtFirstActivate and not W.actDone then
       W.actDone = true; W.pendingUser = "key"; W.knobs.frontIsOther = true   -- 人が戻って別のアプリを押した
@@ -2419,6 +2420,40 @@ test("自動更新: 自動実行の後にも新しい版を確かめる", functi
   local M = loadCopy()
   at9am(function() M._t.maybeRun() end)
   check(W.saved and W.pulled, "書き出した後に pull した")
+end)
+
+-- ===================== 実機（10/23 17:27）の自動の診断で見えたこと =====================
+test("自動の診断: LINE の窓が見えない時は、理由を分けて出す", function()
+  for _, case in ipairs({
+    { setup = function() W.win.exists = false end, want = "この画面（デスクトップ）に LINE の窓が無い" },
+    { setup = function() W.win.minimized = true end, want = "最小化されている" },
+    { setup = function() W.knobs.appHidden = true end, want = "隠されている" },
+  }) do
+    reset({ chats = chats({ "Berry" }) })
+    case.setup()
+    local M = load()
+    M.diag(true)                                  -- 自動の診断（実機で「見えない」と出た所）
+    local out = readfile(DEBUG .. "/latest.txt") or ""
+    check(out:find(case.want, 1, true), case.want .. ":\n" .. out)
+    check(#W.clicks == 0 and W.win.minimized == (case.want == "最小化されている"), "何も押さず、最小化も戻さない")
+  end
+end)
+
+test("昼の「見送り中」の診断ファイルには、その時の理由を「最後の確認」に出す", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  local realdate = os.date
+  os.date = function(fmt, ...)
+    if fmt == "*t" then local t = realdate("*t", ...); t.hour = 17; return t end
+    return realdate(fmt, ...)
+  end
+  W.lastHID = T - 5
+  local ok, err = pcall(function() M._t.maybeRun() end)
+  os.date = realdate
+  if not ok then error(err, 0) end
+  local rep = readfile(DEBUG .. "/latest.txt") or ""
+  check(rep:find("最後の確認: %d+:%d+ 使用中"), "最後の確認:\n" .. rep)
+  check(not rep:find("秒後", 1, true) or not rep:find("約 %-"), "負の秒数を出さない")
 end)
 
 run("rm -rf " .. sh(ROOT))
