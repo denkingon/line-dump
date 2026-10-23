@@ -120,6 +120,54 @@ class TestSyncSh(unittest.TestCase):
         self.assertNotIn("push 完了", r.stdout)
         self.assertEqual(self.origin_log(), before)
 
+    def _diverge_with_conflict(self):
+        """手元の push できなかった commit と、GitHub 側の commit が同じ行を変える"""
+        other = self.tmp / "other"
+        self.git("clone", "-q", str(self.origin), str(other), cwd=self.tmp)
+        (other / ".gitignore").write_text("from-github\n")
+        self.git("commit", "-qam", "github", cwd=other)
+        self.git("push", "-q", "origin", "main", cwd=other)
+        (self.work / ".gitignore").write_text("from-mac\n")
+        self.git("commit", "-qam", "mac local")
+
+    def test_conflicting_rebase_is_aborted_and_nothing_is_pushed(self):
+        self._diverge_with_conflict()
+        before = self.origin_log()
+        r = self.sync()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ぶつかった", r.stdout)
+        self.assertEqual(self.origin_log(), before)
+        self.assertEqual(self.git("symbolic-ref", "--short", "HEAD").strip(), "main")
+        self.assertFalse((self.work / ".git/rebase-merge").exists())
+        self.assertNotIn("<<<<<<<", (self.work / ".gitignore").read_text())
+
+    def test_leftover_rebase_is_aborted_before_syncing(self):
+        self._diverge_with_conflict()
+        subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=self.work, env=self.env,
+                       capture_output=True, text=True)
+        self.assertTrue((self.work / ".git/rebase-merge").exists() or (self.work / ".git/rebase-apply").exists())
+        r = self.sync()
+        self.assertIn("途中で止まっていた積み直しを取り消した", r.stdout)
+        self.assertEqual(self.git("symbolic-ref", "--short", "HEAD").strip(), "main")
+        self.assertNotIn("<<<<<<<", (self.work / ".gitignore").read_text())
+
+    def test_unpushed_sync_commit_is_rebased_and_pushed(self):
+        other = self.tmp / "other"
+        self.git("clone", "-q", str(self.origin), str(other), cwd=self.tmp)
+        (other / "README").write_text("from-github\n")
+        self.git("add", "README", cwd=other)
+        self.git("commit", "-qm", "github", cwd=other)
+        self.git("push", "-q", "origin", "main", cwd=other)
+        (self.work / "chats/old.txt").write_text("x\n")
+        self.git("add", "chats/old.txt")
+        self.git("commit", "-qm", "mac: unpushed")
+        r = self.sync()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        log = self.origin_log()
+        self.assertIn("mac: unpushed", log)
+        self.assertIn("github", log)
+
+
 
 if __name__ == "__main__":
     unittest.main()

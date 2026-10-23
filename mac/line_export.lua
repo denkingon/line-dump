@@ -1283,7 +1283,10 @@ local function harvestNames(win)
         list[#list + 1] = { raw = raw, n = n, exact = exact }
       end
     end
-    if added == 0 then how = "一覧の終わりまで読んだ"; break end
+    if added == 0 then
+      how = #list == 0 and "名前を読めなかった（一覧の行の時刻が見つからない）" or "一覧の終わりまで読んだ"
+      break
+    end
     scrollList(mx, my, -page)
   end
   scrollList(mx, my, 20000)                              -- 一番上に戻しておく
@@ -2426,10 +2429,50 @@ function M.help()
 end
 
 -- 最新の版にする。git pull して、うまくいった時だけ読み込み直す（手で打った時だけ動く）。
+-- ---------- GitHub の main を取り込む ----------
+-- 前の回の積み直し（sync.sh の git pull --rebase）がぶつかって途中で止まっていたら
+-- 取り消す。そのままだと main に戻れず（ブランチ名が無い）、取り込みも自動更新も
+-- ずっと止まる
+local function inRebase()
+  return hs.fs.attributes(REPO .. "/.git/rebase-merge", "mode") ~= nil
+      or hs.fs.attributes(REPO .. "/.git/rebase-apply", "mode") ~= nil
+end
+local function recoverRebase()
+  if not inRebase() then return end
+  hs.execute("git -C " .. sh(REPO) .. " rebase --abort 2>&1", true)
+  log("自動更新: 途中で止まっていた積み直しを取り消した")
+end
+
+-- 早送りで取り込む。できない時（書き出しの後の sync.sh の push が失敗して、手元に
+-- 送れなかった取り込みの commit が残り、GitHub の新しい版と枝分かれしている。実機
+-- 10/23 18:28 の後、新しい版が入らなかった）は、手元に書き換えが無い時だけ、手元の
+-- commit を GitHub の版の上に積み直して取り込み、送る（取り込みの commit は heartbeat と
+-- chats/ だけで、版の更新とはぶつからない）。書き換えがある時は積み直さない（ぶつかった
+-- 印 <<<<<<< がファイルに残ると読み込めなくなり、公開リポジトリにも送ってしまうため）。
+-- 戻り値: true / false, 理由
+local function pullLatest()
+  local git = "git -C " .. sh(REPO) .. " "
+  local out, ok = hs.execute(git .. "pull --ff-only -q origin main 2>&1", true)
+  if ok then return true end
+  local dirty = hs.execute(git .. "status --porcelain --untracked-files=no 2>&1", true) or ""
+  if dirty:match("%S") then
+    return false, tidy((out or ""):gsub("%s+", " ")):sub(1, 160) .. "（手元に書き換えがあるので積み直さない）"
+  end
+  local out2, ok2 = hs.execute(git .. "pull --rebase -q origin main 2>&1", true)
+  if ok2 then
+    log("自動更新: 手元に送れていなかった取り込みを、GitHub の新しい版の上に積み直した")
+    hs.execute(git .. "push -q origin main 2>&1", true)   -- 失敗しても次の sync.sh で送る
+    return true
+  end
+  if inRebase() then hs.execute(git .. "rebase --abort 2>&1", true) end
+  return false, tidy(((out or "") .. " / " .. (out2 or "")):gsub("%s+", " ")):sub(1, 200)
+end
+
 function M.update()
-  local out, ok = hs.execute("git -C " .. sh(REPO) .. " pull --ff-only -q origin main 2>&1", true)
+  recoverRebase()
+  local ok, why = pullLatest()
   if not ok then
-    print("=== 最新にできなかった（git pull に失敗。読み込み直していない）===\n" .. tidy(out or "") ..
+    print("=== 最新にできなかった（git pull に失敗。読み込み直していない）===\n" .. tostring(why) ..
       "\n手元で TARGETS などを書き換えたままだと失敗する。ターミナルで cd " .. tidy(REPO) ..
       " && git status を見る（分からなければ、この表示を Claude に見せる）")
     pcall(function() hs.openConsole(true) end)
@@ -2449,30 +2492,14 @@ end
 -- 実行中・main 以外のブランチでは何もしない。
 local function selfUpdate(why)
   if not AUTO_UPDATE or RUN then return "skip" end
+  recoverRebase()                                 -- 止まった積み直しの間はブランチ名が無い
   if gitBranch() ~= "main" then
     M.lastUpdate = { at = os.time(), why = "main 以外のブランチなので取り込まない" }
     return "notmain"
   end
-  local out, ok = hs.execute("git -C " .. sh(REPO) .. " pull --ff-only -q origin main 2>&1", true)
+  local ok, out = pullLatest()
   if not ok then
-    -- 早送りできない: 書き出しの後の sync.sh の push が失敗して（ネットの切れ目・
-    -- スリープ）、手元に送れなかった取り込みの commit が残り、GitHub の新しい版と
-    -- 枝分かれしている（実機 10/23 18:28 の後、新しい版が入らなかった）。sync.sh と
-    -- 同じく、手元の commit を GitHub の版の上に積み直して取り込み、送る（取り込みの
-    -- commit は heartbeat と chats/ だけで、版の更新とはぶつからない）。積み直せなければ
-    -- 元に戻して今の版のまま動く
-    local out2, ok2 = hs.execute("git -C " .. sh(REPO) .. " pull --rebase --autostash -q origin main 2>&1", true)
-    if ok2 then
-      log("自動更新: 手元に送れていなかった取り込みを、GitHub の新しい版の上に積み直した")
-      hs.execute("git -C " .. sh(REPO) .. " push -q origin main 2>&1", true)   -- 失敗しても次の sync.sh で送る
-      ok = true
-    else
-      hs.execute("git -C " .. sh(REPO) .. " rebase --abort 2>&1", true)
-      out = (out or "") .. " / " .. (out2 or "")
-    end
-  end
-  if not ok then
-    local msg = tidy((out or ""):gsub("%s+", " ")):sub(1, 200)
+    local msg = tostring(out)
     if not (M.lastUpdate and M.lastUpdate.err == msg) then   -- 同じ失敗は30分ごとに書かない
       log("warn: 自動更新の git pull に失敗（手元の変更があるか、ネットに繋がっていない）: " .. msg)
     end

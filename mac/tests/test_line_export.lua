@@ -501,11 +501,17 @@ local function execute(cmd)
   -- 早送りできない時の積み直し（手元に送れなかった取り込みの commit がある）
   if cmd:match("pull %-%-rebase") then
     W.rebased = true
-    if W.knobs.pullFails or W.knobs.rebaseFails then return "error: could not apply 1234abc... mac: LINE書き出しを取り込み\n", false end
+    if W.knobs.pullFails or W.knobs.rebaseFails then
+      run("mkdir -p " .. sh(REPO .. "/.git/rebase-merge"))    -- ぶつかって途中で止まった
+      return "error: could not apply 1234abc... mac: LINE書き出しを取り込み\n", false
+    end
     if W.knobs.newSourceOnRebase then appendCopyFake(W.knobs.newSourceOnRebase) end
     return "", true
   end
-  if cmd:match("rebase %-%-abort") then W.rebaseAborted = true; return "", true end
+  if cmd:match("rebase %-%-abort") then
+    W.rebaseAborted = true; run("rm -rf " .. sh(REPO .. "/.git/rebase-merge")); return "", true
+  end
+  if cmd:match("status %-%-porcelain") then return W.knobs.dirty or "", true end
   if cmd:match("push %-q origin main") then W.pushedAfterRebase = true; return "", true end
   if cmd:match("pmset %-g") then return " displaysleep         " .. (W.knobs.displaySleep or 10) .. "\n", true end
   if cmd:match("^/usr/bin/sips") then W.sips = (W.sips or 0) + 1; return "", true end   -- Linux には無い → PNG のまま
@@ -2917,6 +2923,28 @@ test("自動更新: 積み直しもできなければ元に戻し、今の版の
   W.logs = {}
   check(M._t.selfUpdate("テスト") == "pullfail" and _G.__LINE_EXPORT == M, "今の版のまま")
   check(W.rebaseAborted and not W.pushedAfterRebase, "積み直しを取り消した")
+end)
+
+test("自動更新: 手元に書き換えがある時は積み直さない（ぶつかった印を残さない）", function()
+  reset({ knobs = { pullDiverged = true, dirty = " M mac/line_export.lua\n" } })
+  local M = loadCopy()
+  check(M._t.selfUpdate("テスト") == "pullfail" and not W.rebased, "積み直していない")
+end)
+
+test("自動更新: 前の回の積み直しが途中で止まっていたら取り消してから取り込む", function()
+  reset({ knobs = { newSourceOnRebase = "\n-- x\n" } })
+  run("mkdir -p " .. sh(REPO .. "/.git/rebase-merge"))
+  local M = loadCopy()
+  W.logs = {}
+  M._t.selfUpdate("テスト")
+  check(W.rebaseAborted and not exists(REPO .. "/.git/rebase-merge"), "取り消した")
+  check(table.concat(W.logs, "\n"):find("途中で止まっていた積み直しを取り消した", 1, true), "ログに残す")
+end)
+
+test("手動の update() も、早送りできない時は積み直して最新にする", function()
+  reset({ knobs = { pullDiverged = true } })
+  local M = load()
+  check(M.update() and W.rebased and W.reloaded, "積み直して読み込み直した")
 end)
 
 test("自動更新: 自動実行の後にも新しい版を確かめる", function()
