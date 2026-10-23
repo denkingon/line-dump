@@ -2408,6 +2408,23 @@ local function selfUpdate(why)
   end
   local out, ok = hs.execute("git -C " .. sh(REPO) .. " pull --ff-only -q origin main 2>&1", true)
   if not ok then
+    -- 早送りできない: 書き出しの後の sync.sh の push が失敗して（ネットの切れ目・
+    -- スリープ）、手元に送れなかった取り込みの commit が残り、GitHub の新しい版と
+    -- 枝分かれしている（実機 10/23 18:28 の後、新しい版が入らなかった）。sync.sh と
+    -- 同じく、手元の commit を GitHub の版の上に積み直して取り込み、送る（取り込みの
+    -- commit は heartbeat と chats/ だけで、版の更新とはぶつからない）。積み直せなければ
+    -- 元に戻して今の版のまま動く
+    local out2, ok2 = hs.execute("git -C " .. sh(REPO) .. " pull --rebase --autostash -q origin main 2>&1", true)
+    if ok2 then
+      log("自動更新: 手元に送れていなかった取り込みを、GitHub の新しい版の上に積み直した")
+      hs.execute("git -C " .. sh(REPO) .. " push -q origin main 2>&1", true)   -- 失敗しても次の sync.sh で送る
+      ok = true
+    else
+      hs.execute("git -C " .. sh(REPO) .. " rebase --abort 2>&1", true)
+      out = (out or "") .. " / " .. (out2 or "")
+    end
+  end
+  if not ok then
     local msg = tidy((out or ""):gsub("%s+", " ")):sub(1, 200)
     if not (M.lastUpdate and M.lastUpdate.err == msg) then   -- 同じ失敗は30分ごとに書かない
       log("warn: 自動更新の git pull に失敗（手元の変更があるか、ネットに繋がっていない）: " .. msg)
