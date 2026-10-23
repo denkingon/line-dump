@@ -64,6 +64,12 @@ local function lsdir(d)
 end
 
 local function chat(name) for _, c in ipairs(W.chats) do if c.name == name then return c end end end
+-- 積み直しで新しい版が届いた時に、読み込み元の写しに足す（自動更新のテスト用。SELF_COPY は後で決まる）
+local function appendCopyFake(extra)
+  local p = ROOT .. "/self/line_export.lua"
+  local f = io.open(p, "rb"); local src = f and f:read("a"); if f then f:close() end
+  if src then local g = io.open(p, "wb"); g:write(src .. extra); g:close() end
+end
 
 local function layout()
   local f = W.win
@@ -485,8 +491,18 @@ local function execute(cmd)
   if cmd:match("pull %-%-ff%-only") then
     W.pulled = true
     if W.knobs.pullFails then return "error: Your local changes to the following files would be overwritten by merge:\n", false end
+    if W.knobs.pullDiverged then return "fatal: Not possible to fast-forward, aborting.\n", false end
     return "", true
   end
+  -- 早送りできない時の積み直し（手元に送れなかった取り込みの commit がある）
+  if cmd:match("pull %-%-rebase") then
+    W.rebased = true
+    if W.knobs.pullFails or W.knobs.rebaseFails then return "error: could not apply 1234abc... mac: LINE書き出しを取り込み\n", false end
+    if W.knobs.newSourceOnRebase then appendCopyFake(W.knobs.newSourceOnRebase) end
+    return "", true
+  end
+  if cmd:match("rebase %-%-abort") then W.rebaseAborted = true; return "", true end
+  if cmd:match("push %-q origin main") then W.pushedAfterRebase = true; return "", true end
   if cmd:match("pmset %-g") then return " displaysleep         " .. (W.knobs.displaySleep or 10) .. "\n", true end
   if cmd:match("^/usr/bin/sips") then W.sips = (W.sips or 0) + 1; return "", true end   -- Linux には無い → PNG のまま
   return "", true
@@ -2808,6 +2824,25 @@ test("自動更新: git pull に失敗しても今の版のまま動き、同じ
   local n = 0
   for _, l in ipairs(W.logs) do if l:find("自動更新の git pull に失敗", 1, true) then n = n + 1 end end
   check(n == 1 and _G.__LINE_EXPORT == M, "1回だけ: " .. n)
+end)
+
+test("自動更新: 手元に送れなかった取り込みがあって早送りできない時は、積み直して新しい版を読み込む", function()
+  reset({ knobs = { pullDiverged = true, newSourceOnRebase = "\n-- GitHub の新しい版\n" } })
+  local M = loadCopy()
+  local old = M._t.VERSION
+  W.logs = {}
+  check(M._t.selfUpdate("テスト") == "reloaded", "読み込み直した")
+  check(W.rebased and W.pushedAfterRebase and not W.rebaseAborted, "積み直して送った")
+  check(_G.__LINE_EXPORT._t.VERSION ~= old, "新しい版")
+  check(table.concat(W.logs, "\n"):find("積み直した", 1, true), "ログに残す")
+end)
+
+test("自動更新: 積み直しもできなければ元に戻し、今の版のまま動く", function()
+  reset({ knobs = { pullDiverged = true, rebaseFails = true } })
+  local M = loadCopy()
+  W.logs = {}
+  check(M._t.selfUpdate("テスト") == "pullfail" and _G.__LINE_EXPORT == M, "今の版のまま")
+  check(W.rebaseAborted and not W.pushedAfterRebase, "積み直しを取り消した")
 end)
 
 test("自動更新: 自動実行の後にも新しい版を確かめる", function()
