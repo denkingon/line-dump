@@ -381,7 +381,12 @@ local appObj = {
   bundleID = function() return "jp.naver.line.mac" end,
   pid = function() return LINE_PID end,
   isFrontmost = function() return not (W.knobs.frontIsOther or W.stolen) end,
-  allWindows = function() return W.win.exists and { winObj } or {} end,
+  allWindows = function()
+    if W.knobs.userActsInFindMain and not W.findActDone then   -- 窓を探している間に人が戻った
+      W.findActDone = true; W.lastHID = T; W.knobs.frontIsOther = true
+    end
+    return W.win.exists and { winObj } or {}
+  end,
   focusedWindow = function()
     if W.focusedOther then return otherWin end
     return W.win.visible and winObj or nil
@@ -2314,6 +2319,17 @@ test("push: 変更なし・txt が無い時は「push できず」と言わな�
     M.one("Berry")
     local out = table.concat(W.logs, "\n")
     check(out:find("/ 変更なし ===", 1, true) and not out:find("push できなかった", 1, true), "変更なし:\n" .. out)
+  end
+end)
+
+-- ===================== 4回目のレビューで見つかった穴（v4.1）=====================
+test("窓を探している間に人が戻ったら、窓を前に出したり大きさを変えたりしない", function()
+  for _, w in ipairs({ SCREEN.w, 800 }) do
+    reset({ chats = chats({ "Berry" }), knobs = { userActsInFindMain = true } })
+    W.win.x, W.win.y, W.win.w, W.win.h = SCREEN.x, SCREEN.y, w, SCREEN.h
+    local ok, err = pcall(exportOne, "Berry")
+    check(not ok and type(err) == "table" and err.abort, "中断した（幅 " .. w .. "）")
+    check((W.focusCalls or 0) == 0 and W.win.w == w, "前に出さず大きさも変えていない（幅 " .. w .. "）")
   end
 end)
 

@@ -614,7 +614,10 @@ end
 local function findMain(app, keepMinimized)
   local best, bestArea
   for _, w in ipairs(app:allWindows() or {}) do
-    if w:isMinimized() and not keepMinimized then w:unminimize(); wait(0.5) end
+    if w:isMinimized() and not keepMinimized then
+      guard()                                     -- 実行中なら、人が戻っていれば戻さない
+      w:unminimize(); wait(0.5)
+    end
     if not w:isMinimized() and w:isVisible() and searchField(w) then
       local f = w:frame()
       if not best or f.w * f.h > bestArea then best, bestArea = w, f.w * f.h end
@@ -707,6 +710,7 @@ local function ensureWindow(app)
     app:activate(true); wait(0.8)
     guard()                                       -- 待つ間に人が戻ったら、窓を動かさない
     local win = findMain(app)
+    guard()                                       -- 窓を探す間（AX をたどる・最小化を戻す）も同じ
     if win then
       local sf, f = screenOf(win), win:frame()
       if math.abs(f.w - sf.w) > 40 or math.abs(f.h - sf.h) > 40 then
