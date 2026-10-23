@@ -1,5 +1,19 @@
-last_run: 2026-10-23 17:28:22
+last_run: 2026-10-23 17:42:58
 version: v4.1-7772316f
 ok: 0
-ng: 0
-note: 見送り中: 使用中（無操作 0 秒。180 秒で始める）
+ng: 13
+failures:
+  - オーチュー/小林央忠: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174035_オーチュー_小林央忠_トーク確認.jpg）
+  - 3日後 ハートランド: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174047_3日後 ハートランド_トーク確認.jpg）
+  - かにっこにー: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-174056_かにっこにー_トーク選択.jpg）
+  - 山脇開生: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174114_山脇開生_トーク確認.jpg）
+  - Berry: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174133_Berry_トーク確認.jpg）
+  - パプリカ: [トーク選択] 名前に合う候補が 5 件あり決められない（TARGETS の名前を LINE の表示どおりに）（画像: Dropbox の Backups/line-dump-debug/20261023-174139_パプリカ_トーク選択.jpg）
+  - p Koyo: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174152_p Koyo_トーク確認.jpg）
+  - H Village: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174206_H Village_トーク確認.jpg）
+  - np 雄太: [トーク選択] 名前に合う候補が 2 件あり決められない（TARGETS の名前を LINE の表示どおりに）（画像: Dropbox の Backups/line-dump-debug/20261023-174213_np 雄太_トーク選択.jpg）
+  - il 石川ありがとう: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174226_il 石川ありがとう_トーク確認.jpg）
+  - いりべひでなり: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174238_いりべひでなり_トーク確認.jpg）
+  - 村田研: [トーク選択] 名前に合う候補が 2 件あり決められない（TARGETS の名前を LINE の表示どおりに）（画像: Dropbox の Backups/line-dump-debug/20261023-174245_村田研_トーク選択.jpg）
+  - mP-廣瀬舞: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-174257_mP-廣瀬舞_トーク確認.jpg）
+debug: Dropbox の Backups/line-dump-debug（撮影画像と診断。非公開）
