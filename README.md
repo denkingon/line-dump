@@ -9,8 +9,8 @@ LINE のトーク履歴（txt）を毎日 Cowork / Claude に届けるパイプ�
 
 ```
 【経路0: Mac 自動書き出し ★本命・操作ゼロ】
-毎日 07:00  Hammerspoon が Mac 版 LINE を操作
-  → ⋮ →「トークを保存」→ [LINE]<トーク名>.txt
+毎日 07:00  Hammerspoon が Mac 版 LINE を操作（v4: 画面を OCR で読んでから押す）
+  → 検索 → トークを開く → ⋮ →「トークを保存」→ [LINE]<トーク名>_YYYYMMDD.txt
   → mac/sync.sh: ingest.py → commit → push
               chats/<トーク名>.txt が最新に
 
@@ -108,10 +108,13 @@ line-dump/
 │   ├── ingest.py         書き出し txt → chats/ 正本の更新（スマホ版/Mac版 両対応）
 │   ├── bot_ingest.py     JSON → bot/ ・ slack/ アーカイブへ追記
 │   ├── line_parser.py    LINE txt の構造化（トーク名抽出・行判定に使用）
-│   └── tests/            unittest（45件）
+│   └── tests/            unittest（50件。Mac 側の Lua テストも Lua 5.4 があれば回す）
 ├── mac/                  Mac 側の自動書き出し（経路0）
-│   ├── line_export.lua   Hammerspoon: 毎日 LINE を操作して書き出す
-│   └── sync.sh           書き出した txt を取り込んで commit & push
+│   ├── line_export.lua   Hammerspoon: 毎日 LINE を操作して書き出す（v4: OCR で画面を読む）
+│   ├── ocr.applescript   macOS 標準の Vision OCR（文字と位置を返す）
+│   ├── sync.sh           書き出した txt を取り込んで commit & push（画像は push しない）
+│   ├── heartbeat.txt     最後の実行結果（失敗した段と画像パス。画像は ~/Library/Logs/line-dump/debug）
+│   └── tests/            line_export.lua のテスト（偽の LINE で流れを検証）
 ├── server/               LINE Bot webhook サーバー（Fly.io・標準ライブラリのみ）
 │   ├── app.py            署名検証 + イベント蓄積 + /export API
 │   ├── fly.toml          Fly.io 設定（app: line-dump-bot）
