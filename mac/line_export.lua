@@ -59,7 +59,7 @@ local TARGETS = {
   "かにっこにー",
   "山脇開生",
   "Berry",
-  "パプリカ",
+  "パプリカ🌶️",                 -- 過去の書き出しの保存名どおり（絵文字だけ違うトークと区別する）
   "p Koyo",
   "H Village",
   "np 雄太",
@@ -342,11 +342,16 @@ end
 -- 削除もしない（「村田研一」「村田研ー」「(Berry)」を「村田研」「Berry」と別に扱う）。
 -- 落とすのは空白・絵文字だけ。全角英数は半角・小文字にそろえ、ファイル名で化ける
 -- / : _ だけを同じ字とみなす。
-local function loose(s)
+-- keepEmoji なら絵文字・記号も残し、見えない字（空白・異体字セレクタ等）だけを落とす
+local function invisible(c)
+  return c <= 0x20 or c == 0x7F or c == 0xA0 or c == 0x3000 or (c >= 0x200B and c <= 0x200F)
+      or c == 0xFEFF or (c >= 0xFE00 and c <= 0xFE0F)
+end
+local function loose(s, keepEmoji)
   local ok, r = pcall(function()
     local out = {}
     for _, c in utf8.codes(tostring(s or "")) do
-      if not skipped(c) then
+      if not (keepEmoji and invisible(c) or not keepEmoji and skipped(c)) then
         if c >= 0xFF01 and c <= 0xFF5E then c = c - 0xFEE0 end   -- 全角→半角
         if c >= 0x41 and c <= 0x5A then c = c + 32 end           -- A-Z → a-z
         if c == 0x2F or c == 0x3A then c = 0x5F end              -- / : → _
@@ -1093,8 +1098,14 @@ local function typeName(ctx, field, ffAX, ff)
   pcall(function() field:setAttributeValue("AXFocused", true) end); wait(0.2)
   local focused = fieldFocused(field, ffAX)
   if focused ~= true then
-    clickAt(ff.x + ff.w / 2, ff.y + ff.h / 2); wait(0.3)   -- 画面の位置（AX の枠＋ずれ）
-    focused = fieldFocused(field, ffAX)
+    if ctx.dyMeasured then
+      clickAt(ff.x + ff.w / 2, ff.y + ff.h / 2); wait(0.3)   -- 画面の位置（AX の枠＋ずれ）
+      focused = fieldFocused(field, ffAX)
+    else
+      -- ずれを測れていない時は、押す所が検索欄か分からない（一覧の行に当たりうる）ので
+      -- 押さずに AX で値だけ入れる
+      focused = nil
+    end
   end
   if focused == false then return false end
   if focused then
@@ -1122,6 +1133,7 @@ local function readList(ctx, win, field, ffAX)
     note(ctx, "位置", string.format("LINE が教える検索欄の位置と画面のずれ %+.0fpt（%s）", dy, how))
   end
   ctx.dy, ctx.ff = dy, shifted(ffAX, dy)
+  ctx.dyMeasured = not how:find("測れず", 1, true)
   return items, cap
 end
 
@@ -1183,12 +1195,12 @@ end
 
 -- 検索欄を空にして、普段のトークの一覧に戻す。フォーカスが入ったと確かめられない
 -- 時はキーを送らず、AX で値だけ消す（前のトークの入力欄の下書きを消さない）
-local function clearSearch(field, ffAX, ff)
+local function clearSearch(field, ffAX, ff, measured)
   if norm(attr(field, "AXValue") or "") == "" then return true end
   guard()
   pcall(function() field:setAttributeValue("AXFocused", true) end); wait(0.2)
   local focused = fieldFocused(field, ffAX)
-  if focused ~= true then
+  if focused ~= true and measured then
     clickAt(ff.x + ff.w / 2, ff.y + ff.h / 2); wait(0.3)
     focused = fieldFocused(field, ffAX)
   end
@@ -1210,7 +1222,7 @@ local function harvestNames(win)
   local ctx = {}
   local items = readList(ctx, win, field, ffAX)
   if not items then return nil, "OCR が動かない" end
-  if not clearSearch(field, ffAX, ctx.ff) then return nil, "検索欄を空にできない" end
+  if not clearSearch(field, ffAX, ctx.ff, ctx.dyMeasured) then return nil, "検索欄を空にできない" end
   local f = win:frame()
   local top = ctx.ff.y + ctx.ff.h
   local mx, my = (ctx.ff.x + paneX) / 2, (top + f.y + f.h) / 2
@@ -1373,6 +1385,8 @@ local function openChat(ctx, win)
         st, why, hcap, seen = open(rows[k], top, "検索結果の行")
         if st then
           if k < last then st.next = nextRow end
+          local row = rows[k]
+          st.reopen = function() return open(row, top, "検索結果の行（もう一度）") end
           return st
         end
         if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
@@ -1518,6 +1532,13 @@ local function nameMatches(cur, name)
   return b == n or b == loose(name .. "とのトーク") or b == loose(name .. "のトーク")
 end
 
+-- 絵文字・記号まで同じ名前か（nameMatches は絵文字を除いて比べる）
+local function sameWithEmoji(cur, name)
+  local body = cur:gsub("%.txt$", ""):gsub("^%[LINE%]", "")
+  local b, n = loose(body, true):gsub("^chatwith", ""), loose(name, true)
+  return b == n or b == loose(name .. "とのトーク", true) or b == loose(name .. "のトーク", true)
+end
+
 -- 保存名・ファイル名の伏せ字。TARGETS のどれかと同じトークならその名前、
 -- 違えば字数だけ（他のトーク名をログや診断ファイルに出さない）
 local function maskedSave(cur)
@@ -1555,6 +1576,24 @@ local function saveAndMove(ctx, app, st)
     local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
     e.otherChat = true                            -- 別のトークだった（次の候補があれば試す）
     return nil, e
+  end
+  -- 絵文字・記号だけが違う時（TARGETS「パプリカ」と保存名「パプリカ🌶️」）。TARGETS に
+  -- 絵文字まで書いてあれば別のトーク。書いていなければ、絵文字だけ違う別のトーク
+  -- （「パプリカ🍅」）がまだ開いていない候補や前に開いた候補にあるかもしれないので、
+  -- それが無い時だけ認める
+  if not sameWithEmoji(cur, ctx.name) then
+    local targetHasEmoji = loose(ctx.name) ~= loose(ctx.name, true)
+    ctx.maybe = ctx.maybe or {}
+    local others = false
+    for k in pairs(ctx.maybe) do if k ~= cur then others = true end end
+    if targetHasEmoji or ctx.more or others then
+      local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur) ..
+        (targetHasEmoji and "（絵文字・記号が TARGETS と違う）"
+                        or "（絵文字・記号だけ違うトークが他にもありうる。TARGETS に絵文字まで書くと決められる）"))
+      e.otherChat = true
+      if not targetHasEmoji then ctx.maybe[cur] = true; e.maybeSame = true end
+      return nil, e
+    end
   end
   if ctx.dry then
     -- 確認だけ（check）: 保存名まで確かめたら、何も打たずにキャンセルする
@@ -1652,22 +1691,38 @@ local function exportSteps(app, ctx)
   note(ctx, "窓", string.format("メイン窓（x=%.0f y=%.0f %.0f×%.0f）を前面にした", f.x, f.y, f.w, f.h))
   local st, e = openChat(ctx, win)
   if not st then return false, e end
-  local dst, rejected = nil, {}
+  local dst, rejected, maybeSt = nil, {}, nil
   while true do
+    ctx.more = st.next ~= nil                     -- まだ開いていない候補があるか
     local ok; ok, e = pressSaveChat(ctx, win, st)
     if not ok then return false, e end
     dst, e = saveAndMove(ctx, app, st)
     if dst then break end
     -- 開いたのが別のトークだった（保存名が違った）→ 保存せずに次の候補を開く。
     -- 保存ダイアログが閉じていなければ進まない（次の行を押しても効かない）
-    if not (e.otherChat and st.next) or findSheet(app) then return false, e end
-    note(ctx, "保存ダイアログ", "別のトークだった（" .. e.detail .. "）ので、保存せずに次の候補を開く")
-    ctx.badHeaders = ctx.badHeaders or {}
-    ctx.badHeaders[st.header.n] = true
+    if not e.otherChat or findSheet(app) then return false, e end
+    if e.maybeSame then maybeSt = st              -- 絵文字だけ違った: 同じトークをまた開きうる
+    else
+      ctx.badHeaders = ctx.badHeaders or {}
+      ctx.badHeaders[st.header.n] = true
+    end
     rejected[#rejected + 1] = e.imgPath
-    local st2, e2 = st.next()
-    if not st2 then                               -- 次の候補も合わない: 保存名が違ったことを返す
-      return false, (e2 and e2.stage == "OCR") and e2 or e
+    local st2, e2
+    if st.next then
+      note(ctx, "保存ダイアログ", "別のトークかもしれない（" .. e.detail .. "）ので、保存せずに次の候補を開く")
+      st2, e2 = st.next()
+    end
+    if not st2 then
+      -- 候補を開き終えた。絵文字だけ違ったトークが1つだけで、ほかは別のトークだった時は、
+      -- それを開き直して保存する（決められない時は保存名が違ったことを返す）
+      local n = 0
+      for _ in pairs(ctx.maybe or {}) do n = n + 1 end
+      if maybeSt and n == 1 and maybeSt.reopen and maybeSt ~= st then
+        note(ctx, "保存ダイアログ", "ほかの候補は別のトークだったので、絵文字だけ違ったトークを開き直す")
+        st2, e2 = maybeSt.reopen()
+        if st2 then st2.next, maybeSt = nil, nil end
+      end
+      if not st2 then return false, (e2 and e2.stage == "OCR") and e2 or e end
     end
     st = st2
   end

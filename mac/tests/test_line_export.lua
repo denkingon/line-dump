@@ -912,6 +912,41 @@ test("フルスクリーン（LINE が AX で教える位置が画面より 30pt
   end
 end)
 
+test("実機どおり検索欄に前の名前が残っている時も（検索して開く）、ずれを測って書き出す", function()
+  for _, k in ipairs({ { axDY = 30 }, { axDY = 30, searchPrefix = "Q " }, { axDY = 30, focusIgnored = true },
+                       { axDY = 30, searchUnread = true, magnifier = true }, { axDY = 0 },
+                       { axDY = 0, searchShowsHint = true, magnifier = true, focusIgnored = true } }) do
+    reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true } } })
+    for kk, v in pairs(k) do W.knobs[kk] = v end
+    W.search = "直承"                                -- 前の件の名前
+    W.knobs.paneTop = "裏フェス Urafess"
+    local ok, e = exportOne("Berry")
+    local tag = "axDY=" .. k.axDY .. (k.focusIgnored and " 押してフォーカス" or "") ..
+                (k.searchUnread and " 読めない" or "") .. (k.searchShowsHint and " 表示" or "")
+    check(ok and W.saved and W.saved:find("[LINE]Berry_", 1, true), tag .. ": 書き出した: " .. tostring(e and e.msg))
+    check(W.search == "Berry", tag .. ": 検索した")
+    if k.focusIgnored then
+      local f, hit = layout().field, false
+      for _, c in ipairs(W.clicks) do
+        if c.x >= f.x and c.x <= f.x + f.w and c.y >= f.y and c.y <= f.y + f.h then hit = true end
+      end
+      check(hit, tag .. ": 画面の検索欄を押した")
+    end
+    safe()
+  end
+end)
+
+test("ずれを測れない時は、検索欄のつもりで一覧の行を押さない（AX で名前だけ入れる）", function()
+  reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true } },
+          knobs = { axDY = 30, searchUnread = true, focusIgnored = true } })
+  W.search = "直承"
+  local ok = exportOne("Berry")
+  check(W.searchSetByAX, "AX で名前を入れた")
+  check(#W.openLog == 0 or W.openLog[1] == "Berry", "別のトークを開いていない: " .. table.concat(W.openLog, ","))
+  check(not W.saved or W.saved:find("[LINE]Berry_", 1, true), "別のトークを保存していない")
+  safe()
+end)
+
 test("窓表示の実機: 検索欄に入れた文字が写らず、すぐ下の結果の行に同じ名前がある時、ずれを結果の行で測らない", function()
   for _, k in ipairs({ { axDY = 0, searchShowsHint = true, magnifier = true },
                        { axDY = 0, searchShowsHint = true },
@@ -934,6 +969,7 @@ end)
 test("ずれは毎回測る（同じ実行の中でフルスクリーンから窓表示に変わっても合わせる）", function()
   reset({ chats = chats({ "Berry", "直承Jikisho" }) })
   W.knobs.axDY = 30
+  W.knobs.paneTop = "裏フェス Urafess"             -- 前のずれのまま探すと、ヘッダをこれと取り違える
   local M = load()
   local app = assert(M._t.prepareApp())
   M._t.beginRun(app)
@@ -973,7 +1009,27 @@ test("部分一致の候補は、名前より余分な字が少ない順（絵�
                     { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } })
   local ok = exportOne("パプリカ")
   check(ok and W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ を保存: " .. tostring(W.saved))
-  check(#W.openLog == 1 and W.openLog[1] == "パプリカ🌶️", "別のトークは開いていない: " .. table.concat(W.openLog, ","))
+  -- 絵文字だけ違うので、残りの候補が別のトークだと確かめてから開き直して保存する
+  check(table.concat(W.openLog, ",") == "パプリカ🌶️,パプリカ定例会,パプリカ🌶️", "順に開いた: " .. table.concat(W.openLog, ","))
+  check(not exists(OUT .. "/[LINE]パプリカ定例会_" .. TODAY .. ".txt"), "別のトークは保存していない")
+  safe()
+end)
+
+test("名前が絵文字だけ違うトーク（パプリカ🌶️ と パプリカ🍅）があれば、絵文字の無い TARGETS では決めずに止める", function()
+  reset({ chats = { { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true },
+                    { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } })
+  local ok, e = exportOne("パプリカ")
+  check(not ok and e.msg:find("合わない", 1, true) and tostring(e.detail):find("絵文字", 1, true),
+    "止めた: " .. tostring(e and e.msg) .. " " .. tostring(e and e.detail))
+  check(not W.saved, "どちらも保存していない")
+  safe()
+end)
+
+test("TARGETS に絵文字まで書けば（パプリカ🌶️）、パプリカ🍅 と区別して書き出す", function()
+  reset({ chats = { { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true },
+                    { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } })
+  local ok = exportOne("パプリカ🌶️")
+  check(ok and W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ を保存: " .. tostring(W.saved))
   safe()
 end)
 
@@ -1924,7 +1980,7 @@ test("伏せ字: TARGETS の名前と LINE の決まった表示以外は字数�
   local M = load()
   local m = M._t.masked
   check(m("Berry") == "〈Berry〉", "対象の名前は出す: " .. m("Berry"))
-  check(m("パプリカ🌶️（82）") == "〈パプリカ〉", "絵文字・メンバー数付きでも: " .. m("パプリカ🌶️（82）"))
+  check(m("パプリカ🌶️（82）") == "〈パプリカ🌶️〉", "絵文字・メンバー数付きでも: " .. m("パプリカ🌶️（82）"))
   check(m("かにっこにー3") == "〈かにっこにー〉＋1字", "前方一致は後ろの字数だけ: " .. m("かにっこにー3"))
   check(m("今日のごはんどうする？") == "■11字", "それ以外は字数だけ: " .. m("今日のごはんどうする？"))
   check(m("Berryに会った話なんだけど長くなる") == "■19字", "長い本文に名前が入っていても出さない: " .. m("Berryに会った話なんだけど長くなる"))
