@@ -57,6 +57,12 @@ local function reset(opts)
   for k, v in pairs(opts or {}) do W[k] = v end
 end
 
+local function lsdir(d)
+  local t = {}
+  for n in run("ls " .. sh(d) .. " 2>/dev/null"):gmatch("[^\n]+") do t[#t + 1] = n end
+  return t
+end
+
 local function chat(name) for _, c in ipairs(W.chats) do if c.name == name then return c end end end
 
 local function layout()
@@ -134,6 +140,9 @@ local function visibleTexts(screen)
     if not W.knobs.headerDelay or T - (W.openedAt or 0) >= W.knobs.headerDelay then
       add(c.ocrHeader or c.name, L.header.x, L.header.y)
     end
+    -- ヘッダの右端の ⋮（OCR では1字として読める。noDotsOCR で読めない）と、その左の通話ボタン
+    if not W.knobs.noDotsOCR then add("⋮", L.dots.x, L.dots.y) end
+    if W.knobs.callOCR then add("☎", L.call.x, L.call.y) end
     -- トーク欄の上端（ヘッダより上）にある別の文字
     if W.knobs.paneTop then add(W.knobs.paneTop, W.win.x + 600, W.win.y + 30) end
     for _, m in ipairs(c.messages or {}) do add(m.s, W.win.x + m.dx, W.win.y + m.dy) end
@@ -306,6 +315,7 @@ local function sheetEl()
       doSave(p)
     end }),
     el({ AXRole = "AXButton", AXTitle = "キャンセル" }, { AXPress = function()
+      W.clickAtCancel = W.clickN
       if W.sheet.confirm or W.knobs.cancelIgnored then return end   -- 上書き確認が出ている間は効かない
       W.sheet = nil; W.focus = nil; W.cancelled = true; W.scrollsAtCancel = W.scrollsAtCancel or W.scrolls or 0
     end }),
@@ -1110,6 +1120,42 @@ test("ずらした2回目でだけ開いたメニューも、閉じてから止�
   safe()
 end)
 
+test("⋮ が読めず1回目でメニューが出なければ、隣のボタンを押さないよう押し直さずに止める", function()
+  reset({ chats = chats({ "Berry" }), knobs = { menuDX = -16, noDotsOCR = true, callOCR = true } })
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "メニュー" and e.msg:find("メニューが出ない", 1, true), "止めた: " .. tostring(e and e.msg))
+  check(not W.called, "通話ボタンを押していない")
+  local L, n = layout(), 0
+  for _, c in ipairs(W.clicks) do if math.abs(c.y - L.dots.y) < 20 and c.x > L.call.x - 20 then n = n + 1 end end
+  check(n == 1, "ヘッダの右端は1回だけ押した（" .. n .. " 回）")
+  safe()
+end)
+
+test("⋮ が 8pt を超えて左に読めても（隣のボタンかもしれない）押し直さない", function()
+  reset({ chats = chats({ "Berry" }), knobs = { menuDX = -16 } })
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "メニュー", "止めた: " .. tostring(e and e.stage))
+  safe()
+end)
+
+test("一覧の行で開いたのが「かにっこにー (2)」だったら、保存せずに検索して「かにっこにー」を開き直す", function()
+  reset({ chats = chats({ "かにっこにー (2)", "かにっこにー" }) })
+  local ok = exportOne("かにっこにー")
+  check(ok and W.saved and W.saved:find("[LINE]かにっこにー_", 1, true), "かにっこにー を保存: " .. tostring(W.saved))
+  check(W.cancelled, "かにっこにー (2) のダイアログはキャンセルした")
+  check(#lsdir(DEBUG) == 0 or not table.concat(lsdir(DEBUG), ","):find("保存ダイアログ", 1, true),
+    "別のトークの撮影は残さない: " .. table.concat(lsdir(DEBUG), ","))
+  safe()
+end)
+
+test("別のトークの保存ダイアログが閉じなければ、次の候補へ進まない", function()
+  reset({ chats = chats({ "かにっこにー3", "かにっこにー4" }), knobs = { cancelIgnored = true } })
+  local ok, e = exportOne("かにっこにー")
+  check(not ok and e.msg:find("合わない", 1, true), "止めた: " .. tostring(e and e.msg))
+  check(#W.openLog == 1 and W.clickN == W.clickAtCancel, "次の候補を押していない: " .. table.concat(W.openLog, ","))
+  check(not W.saved, "保存していない")
+end)
+
 test("OCR が「トークを保存」を読めなければ押さずに止める", function()
   reset({ chats = chats({ "Berry" }), knobs = { ocrDrop = { ["トークを保存"] = true } } })
   local ok, e = exportOne("Berry")
@@ -1334,12 +1380,13 @@ test("AX の行を押せなければ、その行の位置をクリックする",
   safe()
 end)
 
-test("AX で完全一致の行を開いたのに別トークが開いたら止める", function()
+test("AX で完全一致の行を開いたのに別トークが開いたら止める（ヘッダは前方一致で通っても保存名で止まる）", function()
   reset({ chats = chats({ "かにっこにー3", "かにっこにー" }),
           knobs = { ocrDropRows = true, wrongChatOnClick = "かにっこにー3" } })
   local ok, e = exportOne("かにっこにー")
-  check(not ok and e.stage == "トーク確認", "トーク確認で失敗: " .. tostring(e and e.stage))
-  check(not W.saved, "保存していない")
+  check(not ok and (e.stage == "トーク確認" or (e.stage == "保存ダイアログ" and e.msg:find("合わない", 1, true))),
+    "トーク確認か保存名で失敗: " .. tostring(e and e.stage))
+  check(not W.saved and not W.sheet, "保存していない（ダイアログは閉じた）")
   safe()
 end)
 
@@ -1367,11 +1414,12 @@ test("画面の座標換算（窓が画面の途中にあっても押す所が�
   safe()
 end)
 
-test("「かにっこにー」を押したのに「かにっこにー3」が開いたら止める", function()
+test("「かにっこにー」を押したのに「かにっこにー3」が開いたら止める（ヘッダは前方一致で通っても保存名で止まる）", function()
   reset({ chats = chats({ "かにっこにー3", "かにっこにー" }), knobs = { wrongChatOnClick = "かにっこにー3" } })
   local ok, e = exportOne("かにっこにー")
-  check(not ok and e.stage == "トーク確認", "トーク確認で失敗: " .. tostring(e and e.stage))
-  check(not W.saved, "保存していない")
+  check(not ok and (e.stage == "トーク確認" or (e.stage == "保存ダイアログ" and e.msg:find("合わない", 1, true))),
+    "トーク確認か保存名で失敗: " .. tostring(e and e.stage))
+  check(not W.saved and not W.sheet, "保存していない（ダイアログは閉じた）")
   safe()
 end)
 
