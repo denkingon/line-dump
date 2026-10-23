@@ -1211,6 +1211,25 @@ test("通知バナーに同じ名前が出ていても、ヘッダは LINE の�
   safe()
 end)
 
+test("検索結果に完全一致が2行あり、1行目で別のトークが開いたら2行目を試す", function()
+  -- 検索結果の「メッセージ」の行など、同じ名前の行が上にあって、押すと別の物が開く
+  reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true }, { name = "Berry", hidden = true, preview = "別の行" } },
+          knobs = { wrongChatOnce = "直承Jikisho" } })
+  local ok, e = exportOne("Berry")
+  check(ok, "2行目で成功: " .. tostring(type(e) == "table" and e.msg or e))
+  safe()
+end)
+
+test("通知バナーがヘッダと同じ高さに目的の名前を出していても、別トークが開いたら止める", function()
+  -- バナーは画面を撮ると写る。ヘッダは LINE の窓だけを撮って読む
+  reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { wrongChatOnClick = "直承Jikisho" } })
+  W.banners = { { s = "Berry", dx = 900, dy = 64 } }
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "トーク確認", "トーク確認で止める: " .. tostring(e and e.stage))
+  check(#W.menuClicked == 0, "メニューを押していない")
+  safe()
+end)
+
 test("押す所に通知などが重なっていたら押さずに止める", function()
   reset({ chats = chats({ "Berry" }) })
   -- 画面右上（⋮ のあたり）に通知が出ている
