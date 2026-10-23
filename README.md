@@ -9,7 +9,8 @@ LINE のトーク履歴（txt）を毎日 Cowork / Claude に届けるパイプ�
 
 ```
 【経路0: Mac 自動書き出し ★本命・操作ゼロ】
-毎日 07:00  Hammerspoon が Mac 版 LINE を操作（v4.1: 画面を OCR で読んでから押す）
+毎日 07:00 以降、Mac を3分触っていない時（画面ロック中は除く）に
+            Hammerspoon が Mac 版 LINE を操作（v4.1: 画面を OCR で読んでから押す）
   → 一覧に見えるトークはそのまま・見えなければ検索して開く → ⋮ →「トークを保存」
   → [LINE]<トーク名>_YYYYMMDD.txt
   → mac/sync.sh: ingest.py → commit → push
@@ -97,7 +98,8 @@ Messaging API も Bot 宛の新規メッセージしか見えない。アプリ�
 「⋮ →トークを保存」だけが唯一の出口なので、そこを自動化するのが本筋になる。
 
 **Mac 自動化の限界**（LINE 側の仕様で回避できない）:
-- 実行時刻に Mac が起動・ログイン状態である必要がある
+- 07:00 以降に Mac が起動・ログインしていて、画面がロックされておらず、3分以上
+  触っていない時間がある必要がある（自動実行が走らない理由は `__LINE_EXPORT.status()`）
 - **画面に読み込まれている分だけ**が保存される。古い履歴が欲しいトークは
   初回だけ手動で上にスクロールして読み込ませる
 
@@ -109,14 +111,14 @@ line-dump/
 │   ├── ingest.py         書き出し txt → chats/ 正本の更新（スマホ版/Mac版 両対応）
 │   ├── bot_ingest.py     JSON → bot/ ・ slack/ アーカイブへ追記
 │   ├── line_parser.py    LINE txt の構造化（トーク名抽出・行判定に使用）
-│   └── tests/            unittest（50件。Mac 側の Lua テストも Lua 5.4 があれば回す）
+│   └── tests/            unittest（51件。Mac 側の Lua テストも Lua 5.4 があれば回す）
 ├── mac/                  Mac 側の自動書き出し（経路0）
 │   ├── line_export.lua   Hammerspoon: 毎日 LINE を操作して書き出す（OCR で画面を読む。
 │   │                     困ったらコンソールで __LINE_EXPORT.status() / check("名前")）
 │   ├── ocr.applescript   macOS 標準の Vision OCR（文字と位置を返す）
 │   ├── sync.sh           書き出した txt を取り込んで commit & push（画像は push しない）
 │   ├── heartbeat.txt     最後の実行結果（失敗した段と画像の名前。画像と伏せ字の診断は
-│   │                     Dropbox の Backups/line-dump-debug。公開リポジトリには入れない）
+│   │                     Dropbox の Backups/line-dump-debug。リポジトリには入れない）
 │   └── tests/            line_export.lua のテスト（偽の LINE で流れを検証）
 ├── server/               LINE Bot webhook サーバー（Fly.io・標準ライブラリのみ）
 │   ├── app.py            署名検証 + イベント蓄積 + /export API

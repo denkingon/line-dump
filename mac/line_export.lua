@@ -24,12 +24,15 @@
 --   使い方（Hammerspoon のコンソールに打つ。結果もコンソールに出る）:
 --     __LINE_EXPORT.help()          この一覧
 --     __LINE_EXPORT.status()        今の状態と、自動実行が走らない理由
---     __LINE_EXPORT.check("Berry")  1件を「トークを保存」の手前まで試す（保存しない）
+--     __LINE_EXPORT.check("Berry")  1件を保存ダイアログで保存名を確かめるところまで試す（保存しない）
 --     __LINE_EXPORT.one("Berry")    1件だけ本当に書き出して push
---     __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ）
+--     __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）
+--     __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）
+--     __LINE_EXPORT.update()        最新の版にする（git pull して、うまくいった時だけ読み込み直す）
 --   ホットキー: 全件を今すぐ ⌘⌥⌃L / 診断 ⌘⌥⌃K / トーク名一覧 ⌘⌥⌃J（⇧ 版でも可）
---   コンソールに出す画面の文字は伏せ字にする（TARGETS の名前と LINE の
---   決まった表示以外は「■n字」）。そのまま貼って共有しても会話の中身は出ない。
+--   status / check / one / diag の出力の画面の文字は伏せ字にする（TARGETS の名前と
+--   LINE の決まった表示以外は「■n字」）。そのまま貼って共有しても会話の中身は出ない
+--   （names はトーク名の一覧を出す。会話の中身は出さない）。
 --   止めたいとき: マウスを動かすかキーを押す
 -- =====================================================================
 local M = {}
@@ -42,11 +45,12 @@ local OUT_DIR = os.getenv("LINE_DUMP_RAW_DIR") or (HOME ..
 
 -- 書き出す対象（トーク名だけ。v3 までの "full"/"official" の型指定は不要）。
 --
--- 検索欄に入れて絞り込み、画面に出た名前と照合してから開く。照合は
--- 絵文字・空白・グループのメンバー数を無視する。完全に一致する行があれば
--- それを開き、ヘッダと保存名も完全一致を求める。完全一致が無い時だけ
--- 部分一致を使うが、候補が2つ以上あれば決めずに止める（別トークを
--- 書き出さないため）。名前は LINE の表示どおりに書くのが確実（⌘⌥⇧J で一覧）。
+-- 一覧に名前がそのまま見えていればその行を、見えなければ検索欄に入れて
+-- 絞り込んだ行を、画面に出た名前と照合してから開く。照合は絵文字・空白・
+-- グループのメンバー数を無視する。一覧からは完全一致の行だけを開く。検索では
+-- 完全一致の行があればそれを開き、無い時だけ部分一致を使うが、候補が2つ以上
+-- あれば決めずに止める。開いたらヘッダで確かめ、保存名は完全一致を求める
+-- （別トークを書き出さないため）。名前は LINE の表示どおりに書くのが確実（⌘⌥⌃J で一覧）。
 local TARGETS = {
   "オーチュー/小林央忠",
   "3日後 ハートランド",
@@ -465,13 +469,16 @@ end
 local function pruneDebug()
   if hs.fs.attributes(DEBUG_DIR, "mode") ~= "directory" then return end
   local limit = os.time() - DEBUG_KEEP_DAYS * 86400
-  for f in hs.fs.dir(DEBUG_DIR) do
-    local p = DEBUG_DIR .. "/" .. f
-    if (f:match("%.png$") or f:match("%.jpg$") or f:match("_report%.txt$"))
-       and (hs.fs.attributes(p, "modification") or limit) < limit then
-      os.remove(p)
+  -- Dropbox のフォルダは一覧が取れないことがある（その時は消さずに続ける）
+  pcall(function()
+    for f in hs.fs.dir(DEBUG_DIR) do
+      local p = DEBUG_DIR .. "/" .. f
+      if (f:match("%.png$") or f:match("%.jpg$") or f:match("_report%.txt$"))
+         and (hs.fs.attributes(p, "modification") or limit) < limit then
+        os.remove(p)
+      end
     end
-  end
+  end)
 end
 
 -- 読めた文字を、画面のどこにあったか（領域）と伏せ字で並べる（診断用）
@@ -1031,13 +1038,6 @@ local function pressSaveChat(ctx, win, st)
         if isSaveLabel(it.n) and (not hit or it.y < hit.y) then hit = it end
       end
     end
-    if hit and ctx.dry then
-      -- 確認だけ（check）: 押さずに、ヘッダのトーク名を押してメニューを閉じる
-      note(ctx, "メニュー", string.format("⋮（x=%.0f y=%.0f）で「トークを保存」が見えた（確認なので押さずに閉じた）",
-        dotsX + d[1], st.header.y + d[2]))
-      clickAt(st.header.x, st.header.y); wait(0.6)
-      return true
-    end
     if hit then
       note(ctx, "メニュー", string.format("⋮（x=%.0f y=%.0f）→「トークを保存」を押した", dotsX + d[1], st.header.y + d[2]))
       clickAt(hit.x, hit.y); return true
@@ -1119,7 +1119,9 @@ end
 -- 違えば字数だけ（他のトーク名をログや診断ファイルに出さない）
 local function maskedSave(cur)
   cur = tostring(cur or "")
-  local dir, base = cur:match("^(.*/)([^/]*)$")
+  -- ファイルのパス（/ か ~ で始まる）だけ、置き場所とファイル名に分ける。
+  -- 名前欄の値はトーク名の「/」をそのまま含むので、分けずに全体を伏せる
+  local dir, base = cur:match("^([/~].*/)([^/]*)$")
   if dir then return dir:gsub("^" .. HOME:gsub("%p", "%%%0"), "~") .. maskedSave(base) end
   for _, t in ipairs(TARGETS) do
     if nameMatches(cur, targetName(t)) then return "[LINE]〈" .. targetName(t) .. "〉" end
@@ -1148,6 +1150,12 @@ local function saveAndMove(ctx, app, st)
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
   if not nameMatches(cur, ctx.name) then
     return failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
+  end
+  if ctx.dry then
+    -- 確認だけ（check）: 保存名まで確かめたら、何も打たずにキャンセルする
+    if not cancelSheet(app) then return fail(ctx, "保存ダイアログ", "確認の後、保存ダイアログを閉じられない") end
+    note(ctx, "保存ダイアログ", "保存名 " .. maskedSave(cur) .. " を確かめた（確認なのでキャンセルした）")
+    return "dry"
   end
 
   -- ファイル名に書き出し日を付ける（[LINE]○○_20261020.txt）。既定名は毎回
@@ -1251,14 +1259,14 @@ local function exportSteps(app, ctx)
   if not st then return false, e end
   local ok; ok, e = pressSaveChat(ctx, win, st)
   if not ok then return false, e end
-  if ctx.dry then return true, "（確認だけ。保存はしていない）" end
   local dst; dst, e = saveAndMove(ctx, app, st)
   if not dst then return false, e end
+  if dst == "dry" then return true, "（確認だけ。保存はしていない）" end
   note(ctx, "保存", "保存して Linetxt に置いた（" .. (dst:match("[^/]+$") or dst) .. "）")
   return true, dst
 end
 
--- 1件を書き出す（opts.dry なら「トークを保存」が見えるところまで）。
+-- 1件を書き出す（opts.dry なら保存ダイアログで保存名を確かめてキャンセルするまで）。
 -- 人の操作を検知したら error({abort=…}) で全体を止める。opts.trace に段ごとの経過。
 local function exportOne(app, name, opts)
   opts = opts or {}
@@ -1272,18 +1280,36 @@ local function exportOne(app, name, opts)
   error(r1, 0)
 end
 
--- 失敗した段ごとの「次にすること」。この Mac で人が手を動かす必要がある時だけ
--- 書く。読み方・押し方の問題は、診断と撮影画像を Dropbox に残すので、それを
--- 見て直した版を出す。
-local HINTS = {
-  ["窓"]         = "LINE を開いて、トークの一覧（検索欄のある画面）を出しておく",
-  ["検索欄"]     = "LINE を開いて、トークの一覧（検索欄のある画面）を出しておく",
-  ["OCR"]        = "画面収録の許可を確かめる（システム設定 → プライバシーとセキュリティ → " ..
-                   "画面とシステムオーディオ録音 → Hammerspoon をオン）",
-  ["トーク選択"] = "TARGETS の名前が LINE の表示と違うかもしれない（⌘⌥⌃J で一覧を出せる）",
-  ["クリック"]   = "LINE の上に通知や別の窓が重なっていた・LINE が前に来なかった",
-  ["移動"]       = "ダウンロード等へのアクセス許可（docs/setup-mac-auto.md 手順3）",
-}
+-- 失敗した時の「次にすること」（コンソール用）。この Mac で人が手を動かせば
+-- 直るものだけ具体的に書く。読み方・押し方の問題は、診断と撮影画像を Dropbox に
+-- 残すので、それを見て直した版を出す（Claude に「LINE書き出しの診断を見て直して」と頼む）。
+local NO_HINT = "この Mac ですることは無い。診断と撮影画像を " .. DEBUG_SHOW ..
+                " に残したので、Claude に「LINE書き出しの診断を見て直して」と頼む"
+local function hintFor(e)
+  local st, detail = e.stage, tostring(e.detail or "")
+  if st == "窓" or st == "検索欄" then
+    return "LINE を開いて、トークの一覧（検索欄のある画面）を出しておく。別窓で開いたトークは閉じる"
+  elseif st == "OCR" and detail:find("画面を撮れない", 1, true) then
+    return "画面収録の許可を確かめる（システム設定 → プライバシーとセキュリティ → " ..
+           "画面とシステムオーディオ録音 → Hammerspoon をオン → Hammerspoon を再起動）"
+  elseif st == "OCR" then
+    return "OCR（mac/ocr.applescript）が動かない。ターミナルで osascript " .. tidy(OCR_SCRIPT) ..
+           " <画像> を試し、出たエラーを Claude に見せる"
+  elseif st == "トーク選択" then
+    return "TARGETS の名前を LINE の表示どおりに直す（⌘⌥⌃J で一覧を出せる）"
+  elseif st == "保存ダイアログ" and tostring(e.msg):find("合わない", 1, true) then
+    return "トーク名が変わったのかもしれない。LINE の表示名を確かめて TARGETS を直す（⌘⌥⌃J で一覧）"
+  elseif st == "保存" and tostring(e.msg):find("上書き", 1, true) then
+    return "過去の書き出しを上書きしないよう止めた。LINE で ⋮ →「トークを保存」を手で開き、名前欄に日付を足せるか確かめる"
+  elseif st == "クリック" then
+    return "集中モード（おやすみモード）を ON にして通知を止め、LINE の上に他の窓が無い状態でもう一度"
+  elseif st == "移動" then
+    return "ダウンロード等へのアクセス許可を確かめる（docs/setup-mac-auto.md 手順3）"
+  elseif st == "中断" and not tostring(e.msg):find("時間切れ", 1, true) then
+    return "実行中はマウスやキーに触らない（触ると止まる）。もう一度"
+  end
+  return NO_HINT
+end
 
 -- ダウンロード・デスクトップ・書類に一度触って、「ファイルとフォルダ」の
 -- 確認ダイアログを人がいる手動実行のうちに出しておく（無人の 07:00 に出ると
@@ -1348,10 +1374,16 @@ end
 -- 書き出した txt を取り込んで push する。第2引数の true は「ログインシェルの
 -- 環境を使う」指定。これが無いと PATH が最小限になり、git や python が
 -- 見つからないことがある。
+-- 戻り値: "push済" / "変更なし" / "push できず"（詳しくは mac/sync.log）。
+-- sync.sh の出力には取り込んだファイル名（トーク名）が入るので、コンソールには結果だけ出す。
 local function runSync()
-  local out = hs.execute('/bin/bash "' .. REPO .. '/mac/sync.sh" 2>&1', true)
-  log("sync:\n" .. (out or ""))
-  return (out or ""):match("push 完了") and "push済" or "push無し"
+  local out = hs.execute('/bin/bash "' .. REPO .. '/mac/sync.sh" 2>&1', true) or ""
+  local r
+  if out:find("push 完了", 1, true) then r = "push済"
+  elseif out:find("変更なし", 1, true) or out:find("取り込む txt が無い", 1, true) then r = "変更なし"
+  else r = "push できず" end
+  log("sync: " .. r .. (r == "push できず" and ("（理由は " .. tidy(REPO) .. "/mac/sync.log）") or ""))
+  return r
 end
 
 -- ---------- 毎日の自動実行の状態 ----------
@@ -1383,6 +1415,8 @@ local function writeState(s)
 end
 
 -- 今日の結果。読み込み直しても、書き出せたトークを飛ばして続きからやれるように。
+--   day / version（その結果を出した版）/ ng（最後まで回った時の失敗数）/
+--   ok=（書き出せたトーク）/ failed=（始められなかった理由）/ stopped=（中断の理由）
 -- 前の版（v4）は書かないので、無ければ heartbeat から日付・版・失敗数だけ読む。
 local function readResult()
   local r = { day = "", version = "", ng = 0, ok = {} }
@@ -1393,7 +1427,9 @@ local function readResult()
       if k == "day" then r.day = v
       elseif k == "version" then r.version = v
       elseif k == "ng" then r.ng = tonumber(v) or 0
-      elseif k == "ok" then r.ok[v] = true end
+      elseif k == "ok" then r.ok[v] = true
+      elseif k == "failed" then r.failed = v
+      elseif k == "stopped" then r.stopped = v end
     end
     f:close()
     return r
@@ -1405,12 +1441,20 @@ local function readResult()
   r.ng = tonumber(hb:match("\nng: (%d+)")) or 0
   return r
 end
-local function writeResult(ngN, okSet)
+local function writeResult(r)
   local f = io.open(RESULT_PATH, "w")
   if not f then return end
-  f:write("day=" .. today() .. "\nversion=" .. VERSION .. "\nng=" .. ngN .. "\n")
-  for n in pairs(okSet) do f:write("ok=" .. n .. "\n") end
+  f:write("day=" .. today() .. "\nversion=" .. (r.version or VERSION) .. "\nng=" .. (r.ng or 0) .. "\n")
+  for n in pairs(r.ok or {}) do f:write("ok=" .. n .. "\n") end
+  if r.failed then f:write("failed=" .. r.failed:gsub("[\r\n]", " ") .. "\n") end
+  if r.stopped then f:write("stopped=" .. r.stopped:gsub("[\r\n]", " ") .. "\n") end
   f:close()
+end
+-- 今日の結果（別の日の結果なら空から）
+local function todayResult()
+  local r = readResult()
+  if r.day ~= today() then r = { day = today(), version = "", ng = 0, ok = {} } end
+  return r
 end
 
 local function screenLocked()
@@ -1468,15 +1512,19 @@ local function statusLines()
   add(br == "main", "リポジトリのブランチ: " .. (br ~= "" and br or "不明") ..
     (br == "main" and "" or "（main 以外では取り込み・push をしない）"))
   local day, aborts = readState()
-  local res = readResult()
+  local res = todayResult()
+  if res.failed then
+    add(false, "今日の自動実行: 始められない（" .. res.failed .. "）。直れば次の確認で自動で始める")
+  end
   if day == today() and aborts == nil then
-    local retry = res.day == today() and res.ng > 0 and res.version ~= VERSION
-    add(nil, "今日の自動実行: 済み" .. (res.day == today() and ("（失敗 " .. res.ng .. " 件）") or "") ..
+    local known = res.version ~= ""
+    local retry = known and res.ng > 0 and res.version ~= VERSION
+    add(nil, "今日の書き出し: 済み" .. (known and ("（失敗 " .. res.ng .. " 件）") or "") ..
       (retry and "。新しい版が入ったので、離席したら失敗分をやり直す" or ""))
-  elseif day == today() then
-    add(nil, "今日の自動実行: 人の操作で " .. aborts .. " 回中断" ..
-      (aborts >= MAX_ABORTS and "（今日はもうやらない）" or "（離席したら続きからやり直す）"))
-  else
+  elseif day == today() and aborts and aborts > 0 then
+    add(nil, "今日の自動実行: " .. aborts .. " 回中断（最後: " .. (res.stopped or "理由不明") .. "）" ..
+      (aborts >= MAX_ABORTS and "。今日は自動ではもうやらない（⌘⌥⌃L で手動）" or "。離席したら続きからやり直す"))
+  elseif not res.failed then
     add(nil, "今日の自動実行: まだ")
   end
   add(nil, string.format("自動実行の条件: 毎日 %s 以降、%d 分以上 Mac を触っていない・画面ロック無し（%d 秒ごとに確認）",
@@ -1582,8 +1630,9 @@ local function tryOne(name, dry)
   if not okc then
     if type(ok) == "table" and ok.abort then
       log("中断: " .. ok.abort)
-      out("✗ 中断: " .. ok.abort .. "（マウスやキーに触れると止まる）")
       result.e = { stage = "中断", msg = ok.abort }
+      out("✗ 中断: " .. ok.abort)
+      out("    次にすること: " .. hintFor(result.e))
       return finish("LINE書き出しを中断: " .. ok.abort)
     end
     ok, e = false, { stage = "内部エラー", msg = tidy(ok) }
@@ -1591,15 +1640,16 @@ local function tryOne(name, dry)
   if not ok then
     result.e = e
     out("✗ " .. e.stage .. ": " .. e.msg)
-    if e.detail then out("    見えたもの: " .. e.detail) end
+    if e.detail then out("    詳しく: " .. e.detail) end
     if e.img then out("    画像: " .. e.img) end
-    out("    次にすること: " .. (HINTS[e.stage] or "なし（診断と画像を Dropbox に残した。それを見て直す）"))
+    out("    次にすること: " .. hintFor(e))
     log("NG  " .. name .. "  " .. describe(e, true))
     return finish("NG: " .. name .. "\n[" .. e.stage .. "] " .. e.msg)
   end
   result.ok = true
   if dry then
-    out("=== OK: 「トークを保存」まで届いた。__LINE_EXPORT.one(\"" .. name .. "\") で本当に書き出せる ===")
+    out("=== OK: 保存ダイアログで保存名まで確かめた（保存はしていない）。" ..
+        "__LINE_EXPORT.one(\"" .. name .. "\") で本当に書き出せる ===")
     return finish("確認OK: " .. name .. "（保存はしていない）")
   end
   local file = e:match("[^/]+$") or e
@@ -1607,6 +1657,9 @@ local function tryOne(name, dry)
   log("OK  " .. name .. " → " .. tidy(e))
   local pushed = runSync()
   out("=== OK: " .. file .. " を書き出した / " .. pushed .. " ===")
+  if pushed == "push できず" then
+    out("    push できなかった（書き出したファイルは Linetxt にある）。理由は " .. tidy(REPO) .. "/mac/sync.log")
+  end
   return finish("書き出しOK: " .. name .. " / " .. pushed)
 end
 
@@ -1615,7 +1668,7 @@ function M.one(name)
   if not name then M.help(); return false end
   return tryOne(name, false)
 end
--- 1件を「トークを保存」が見えるところまで試す（保存はしない）: __LINE_EXPORT.check("Berry")
+-- 1件を、保存ダイアログで保存名を確かめるところまで試す（保存はしない）: __LINE_EXPORT.check("Berry")
 function M.check(name)
   return tryOne(name or targetName(TARGETS[1]), true)
 end
@@ -1627,13 +1680,15 @@ local DONE = (function()
   return { day = r.day, ok = r.day == today() and r.ok or {} }
 end)()
 
--- 全件を書き出す。auto=true は無人の自動実行。戻り値:
---   "done" 最後まで / "aborted" 人の操作で止めた（やり直してよい）/
---   "notready" LINE を起動しただけ（その日の回数は使わない）/ "failed" 始められない
+-- 全件を書き出す。auto=true は無人の自動実行。戻り値（2つ目は理由）:
+--   "done" 最後まで / "aborted" 途中で止めた（人の操作・時間切れ。やり直してよい）/
+--   "busy" 手が動いていて始めなかった / "notready" LINE を起動しただけ /
+--   "failed" 始められない（画面収録の許可が無い・保存先が無い など）
+-- busy・notready・failed はその日の回数を使わない（直れば次の確認で始める）。
 local function runExport(auto)
   if #TARGETS == 0 then
     hs.alert.show("TARGETS が空です。line_export.lua を編集してください", 4)
-    log("TARGETS が空"); return "failed"
+    log("TARGETS が空"); return "failed", "TARGETS が空"
   end
 
   local app, err, why = prepareApp(not auto)
@@ -1641,20 +1696,26 @@ local function runExport(auto)
     log(err)
     if why == "notrunning" then
       hs.alert.show(err .. (auto and "（次の確認で実行）" or "。開いたらもう一度 ⌘⌥⌃L"), 6)
-      return "notready"
+      return "notready", err
     end
-    -- 原因をリポジトリに残す（このMacのログを毎回見に行かなくて済むように）
-    hs.alert.show("LINE書き出し中止: " .. err, 6)
-    writeHeartbeat(0, #TARGETS, { "全件: " .. err })
-    writeReport("始められない: " .. err, {})
-    runSync()
-    return "failed"
+    -- 原因をリポジトリに残す（このMacのログを毎回見に行かなくて済むように）。
+    -- 自動実行は直るまで毎分確かめるので、同じ理由は1日1回だけ残す
+    local res = todayResult()
+    if not auto or res.failed ~= err then
+      hs.alert.show("LINE書き出し中止: " .. err, 6)
+      writeHeartbeat(0, #TARGETS, { "全件: " .. err })
+      res.failed = err
+      writeResult(res)
+      writeReport("始められない: " .. err, {})
+      runSync()
+    end
+    return "failed", err
   end
 
   if not beginRun(app, auto) then
     log("手が動いているので始めなかった")
     if not auto then hs.alert.show("手が動いているので始めなかった。手を離してからもう一度 ⌘⌥⌃L", 4) end
-    return "aborted"
+    return "busy", "手が動いていた"
   end
   if DONE.day ~= today() then DONE = { day = today(), ok = {} } end
   local okN, ngN, ngLines, stopped, results = 0, 0, {}, nil, {}
@@ -1693,15 +1754,24 @@ local function runExport(auto)
   -- 結果をリポジトリに残す。ログはこのMacにしか無く、失敗の理由を
   -- 毎回コンソールから貼ってもらうのは現実的でないため、push して共有する。
   -- 段ごとの経過と失敗した時の画面（伏せ字）・撮影画像は Dropbox に置く。
-  writeResult(stopped and -1 or ngN, DONE.ok)
+  -- 途中で止めた時は、前に最後まで回った時の失敗数と版を残す（新しい版でのやり直しの目安）
+  local res = todayResult()
+  if stopped then
+    res.ok, res.stopped = DONE.ok, stopped
+  else
+    res = { version = VERSION, ng = ngN, ok = DONE.ok }
+  end
+  writeResult(res)
   writeHeartbeat(okN, ngN, ngLines, stopped and ("中断: " .. stopped))
   writeReport((auto and "自動実行" or "手動実行") .. (stopped and "・中断" or ""), results)
 
   local pushed = runSync()
   hs.alert.show(string.format("LINE書き出し OK:%d NG:%d%s / %s", okN, ngN,
     stopped and (" 中断") or "", pushed), 4)
-  if not auto and (ngN > 0 or stopped) then pcall(function() hs.openConsole(true) end) end
-  return stopped and "aborted" or "done"
+  if not auto and (ngN > 0 or stopped or pushed == "push できず") then
+    pcall(function() hs.openConsole(true) end)
+  end
+  return stopped and "aborted" or "done", stopped or (ngN .. " 件失敗")
 end
 
 -- 画面の読み取り診断: 今の LINE の窓を撮って、読めた文字を位置と領域つきで
@@ -1778,19 +1848,37 @@ function M.help()
   print(table.concat({
     "=== LINE書き出し の使い方（" .. VERSION .. "）===",
     "  ふだんは何もしなくてよい。毎日 " .. RUN_AT .. " 以降、Mac を " .. IDLE_REQUIRED // 60 ..
-      " 分以上触っていない時に自動で書き出して push する。",
+      " 分以上触っていない時（画面ロック中は除く）に自動で書き出して push する。",
+    "  1回の実行は " .. RUN_LIMIT_MIN .. " 分まで（固まったら止める）。",
     "  失敗したら撮影画像と診断（伏せ字）を " .. DEBUG_SHOW .. " に残す。",
     "",
     "  __LINE_EXPORT.status()        今の状態と、自動実行が走らない理由",
-    "  __LINE_EXPORT.check(\"Berry\")  1件を「トークを保存」が見えるところまで試す（保存しない）",
+    "  __LINE_EXPORT.check(\"Berry\")  1件を保存ダイアログで保存名を確かめるところまで試す（保存しない）",
     "  __LINE_EXPORT.one(\"Berry\")    1件だけ本当に書き出して push",
     "  __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）",
     "  __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）",
+    "  __LINE_EXPORT.update()        最新の版にする（git pull して、うまくいった時だけ読み込み直す）",
     "  ⌘⌥⌃L 全件を今すぐ書き出す（⇧ 版でも可）",
     "  止めたいとき: マウスを動かすかキーを押す",
-    "  コンソールの画面の文字は伏せ字（TARGETS の名前と LINE の決まった表示以外は ■n字）",
+    "  status / check / one / diag の画面の文字は伏せ字（TARGETS の名前と LINE の決まった表示以外は ■n字）",
   }, "\n"))
   pcall(function() hs.openConsole(true) end)
+end
+
+-- 最新の版にする。git pull して、うまくいった時だけ読み込み直す（手で打った時だけ動く）。
+function M.update()
+  local out, ok = hs.execute("git -C " .. sh(REPO) .. " pull --ff-only -q origin main 2>&1", true)
+  if not ok then
+    print("=== 最新にできなかった（git pull に失敗。読み込み直していない）===\n" .. tidy(out or "") ..
+      "\n手元で TARGETS などを書き換えたままだと失敗する。ターミナルで cd " .. tidy(REPO) ..
+      " && git status を見る（分からなければ、この表示を Claude に見せる）")
+    pcall(function() hs.openConsole(true) end)
+    hs.alert.show("最新にできなかった（コンソールを見る）", 5)
+    return false
+  end
+  print("=== 最新にした。読み込み直す ===")
+  hs.reload()
+  return true
 end
 
 -- トーク名の一覧（TARGETS に貼るため）。一覧の列の行だけを読む（トーク欄の
@@ -1827,11 +1915,16 @@ function M.names()
 end
 
 -- ---------- 毎日の自動実行 ----------
-local skipLogged, skipReported = {}, {}
+local skipLogged = {}
 local function checked(why) M.lastCheck = { at = os.time(), why = why } end
+-- 今日の heartbeat をもう書いたか（昼の「見送り中」を、読み込み直しても1日1回にする）
+local function heartbeatToday()
+  return (readAll(REPO .. "/mac/heartbeat.txt") or ""):find("last_run: " .. os.date("%Y-%m-%d"), 1, true) ~= nil
+end
 local function maybeRun()
   local day = today()
   local stateDay, aborts = readState()
+  local before = (readAll(STATE_PATH) or ""):gsub("%s", "")   -- 始められなかった時に戻す
   local retry = false
   if stateDay == day and (aborts == nil or aborts >= MAX_ABORTS) then
     -- 今日は済み。ただし新しい版が入った日は、失敗していた分をもう一度試す（版ごとに1回）
@@ -1839,7 +1932,7 @@ local function maybeRun()
     if aborts == nil and res.day == day and res.ng > 0 and res.version ~= VERSION then
       retry = true
     else
-      return checked(aborts == nil and "今日は済み" or ("今日は人の操作で " .. aborts .. " 回中断したので、もうやらない"))
+      return checked(aborts == nil and "今日は済み" or ("今日は " .. aborts .. " 回中断したので、自動ではもうやらない"))
     end
   end
 
@@ -1863,9 +1956,8 @@ local function maybeRun()
   end
   if why then
     -- 昼になっても走れていない日は、理由を heartbeat に残す（GitHub から見て
-    -- 走らなかった理由が分かるように。1日1回）
-    if t.hour >= 12 and stateDay ~= day and not skipReported[day] then
-      skipReported[day] = true
+    -- 走らなかった理由が分かるように。今日の heartbeat がまだ無い時だけ＝1日1回）
+    if t.hour >= 12 and stateDay ~= day and not heartbeatToday() then
       writeHeartbeat(0, 0, {}, "見送り中: " .. why)
       writeReport("見送り中: " .. why, {})
       runSync()
@@ -1878,17 +1970,26 @@ local function maybeRun()
   checked(retry and "新しい版で失敗分のやり直しを開始" or "自動実行を開始")
   if retry then log("新しい版（" .. VERSION .. "）が入ったので、今日失敗した分をもう一度試す") end
   log("自動実行を開始（" .. os.date("%H:%M") .. "）")
-  local r = runExport(true)
+  local okr, r, detail = pcall(runExport, true)
+  if not okr then
+    -- 想定外のエラー（書き出しの外側）。今日を済みにせず、次の確認でやり直す
+    if RUN then endRun() end
+    log("error: 自動実行で想定外のエラー: " .. tidy(r))
+    r, detail = "failed", "想定外のエラー"
+  end
   if r == "aborted" then
-    -- 人が戻ってきて止めた日は、また離席したらやり直す（上限あり）
+    -- 人が戻ってきて止めた・時間切れの日は、また離席したらやり直す（上限あり）
     writeState(day .. ":" .. ((stateDay == day and aborts or 0) + 1))
-  elseif r == "notready" then
-    -- LINE を起動しただけ。その日の回数は使わずに次の確認でやり直す
-    writeState(stateDay == day and (day .. ":" .. (aborts or 0)) or "")
-  elseif r == "failed" and retry then
-    -- 始められなくても、この版でのやり直しは1回だけ（毎分 heartbeat を書いて push しない）
-    local res = readResult()
-    writeResult(res.ng, res.ok)
+    checked("中断: " .. tostring(detail))
+  elseif r == "done" then
+    checked("自動実行: 最後まで（" .. tostring(detail) .. "）")
+  else
+    -- 始められなかった（LINE を起動しただけ・手が動いていた・画面収録の許可が無い など）。
+    -- その日の回数は使わず、元の状態に戻して次の確認でやり直す
+    writeState(before)
+    checked((r == "notready" and "LINE を起動した（次の確認で始める）")
+         or (r == "busy" and "手が動いていたので始めなかった")
+         or ("始められない: " .. tostring(detail)))
   end
 end
 
