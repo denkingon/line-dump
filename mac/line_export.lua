@@ -28,7 +28,7 @@
 --     __LINE_EXPORT.one("Berry")    1件だけ本当に書き出して push
 --     __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）
 --     __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）
---     __LINE_EXPORT.update()        最新の版にする（git pull して、うまくいった時だけ読み込み直す）
+--     __LINE_EXPORT.update()        今すぐ最新の版にする（ふだんは30分ごとの自動更新に任せてよい）
 --   ホットキー: 全件を今すぐ ⌘⌥⌃L / 診断 ⌘⌥⌃K / トーク名一覧 ⌘⌥⌃J（⇧ 版でも可）
 --   status / check / one / diag の出力の画面の文字は伏せ字にする（TARGETS の名前と
 --   LINE の決まった表示以外は「■n字」）。そのまま貼って共有しても会話の中身は出ない
@@ -120,7 +120,9 @@ local function readAll(p)
   local f = io.open(p, "rb"); if not f then return nil end
   local s = f:read("a"); f:close(); return s
 end
-local LOADED_SRC = readAll(SELF) or ""
+-- 自動更新で読み込み直した時は、読み込んだ中身をそのまま受け取る（版を正しく作るため）
+local LOADED_SRC = _G.__LINE_EXPORT_SRC or readAll(SELF) or ""
+_G.__LINE_EXPORT_SRC = nil
 local function checksum(s)
   local h = 0
   for i = 1, #s do h = (h * 31 + s:byte(i)) % 4294967296 end
@@ -1428,6 +1430,10 @@ local LOADED_PATH   = REPO .. "/mac/.loaded_version"
 local CHECK_EVERY   = 60    -- 1分ごとに条件を確認（離席して画面が消えるまでの間を逃さない）
 local IDLE_REQUIRED = 180   -- 3分以上操作が無ければ「離席中」とみなす
 local MAX_ABORTS    = 3     -- 人の操作で中断した日は、離席を待ってこの回数までやり直す
+-- 自動更新: GitHub の main に新しい版が来たら取り込んで読み込み直す（2026-10-23 に了承を得た）。
+-- 止めたい時は false にする（手で最新にするのは __LINE_EXPORT.update()）。
+local AUTO_UPDATE   = true
+local UPDATE_EVERY  = 1800  -- 30分ごとに確認
 
 local function readState()
   local f = io.open(STATE_PATH, "r")
@@ -1539,7 +1545,9 @@ local function statusLines()
   add(hs.fs.attributes(OUT_DIR, "mode") == "directory", "保存先フォルダ（Linetxt）")
   local br = gitBranch()
   add(br == "main", "リポジトリのブランチ: " .. (br ~= "" and br or "不明") ..
-    (br == "main" and "" or "（main 以外では取り込み・push をしない）"))
+    (br == "main" and "" or "（main 以外では取り込み・push・自動更新をしない）"))
+  add(nil, "自動更新: " .. (AUTO_UPDATE and ("オン（" .. UPDATE_EVERY // 60 .. " 分ごとに GitHub の main を見る）") or "オフ") ..
+    (M.lastUpdate and ("。最後: " .. os.date("%H:%M", M.lastUpdate.at) .. " " .. M.lastUpdate.why) or ""))
   local day, aborts = readState()
   local res = todayResult()
   if res.failed then
@@ -1883,13 +1891,14 @@ function M.help()
       " 分以上触っていない時（画面ロック中は除く）に自動で書き出して push する。",
     "  1回の実行は " .. RUN_LIMIT_MIN .. " 分まで（固まったら止める）。",
     "  失敗したら撮影画像と診断（伏せ字）を " .. DEBUG_SHOW .. " に残す。",
+    "  直した版は GitHub から自動で取り込む（" .. UPDATE_EVERY // 60 .. " 分ごと。自動実行の後にも）。",
     "",
     "  __LINE_EXPORT.status()        今の状態と、自動実行が走らない理由",
     "  __LINE_EXPORT.check(\"Berry\")  1件を保存ダイアログで保存名を確かめるところまで試す（保存しない）",
     "  __LINE_EXPORT.one(\"Berry\")    1件だけ本当に書き出して push",
     "  __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）",
     "  __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）",
-    "  __LINE_EXPORT.update()        最新の版にする（git pull して、うまくいった時だけ読み込み直す）",
+    "  __LINE_EXPORT.update()        今すぐ最新の版にする（ふだんは自動更新に任せてよい）",
     "  ⌘⌥⌃L 全件を今すぐ書き出す（⇧ 版でも可）",
     "  止めたいとき: マウスを動かすかキーを押す",
     "  status / check / one / diag の画面の文字は伏せ字（TARGETS の名前と LINE の決まった表示以外は ■n字）",
@@ -1911,6 +1920,53 @@ function M.update()
   print("=== 最新にした。読み込み直す ===")
   hs.reload()
   return true
+end
+
+-- ---------- 自動更新 ----------
+-- GitHub の main に新しい版が来たら取り込み、読み込み直す（直した版を、この Mac で
+-- 手を動かさずに使えるように。2026-10-23 に了承を得た）。UPDATE_EVERY ごとと自動実行の
+-- 後に git pull --ff-only し、このファイルが変わっていれば、文法を確かめてから
+-- 読み込み直す。読み込みに失敗したら元の版に戻す（同じ中身では2度試さない）。
+-- 実行中・main 以外のブランチでは何もしない。
+local function selfUpdate(why)
+  if not AUTO_UPDATE or RUN then return "skip" end
+  if gitBranch() ~= "main" then
+    M.lastUpdate = { at = os.time(), why = "main 以外のブランチなので取り込まない" }
+    return "notmain"
+  end
+  local out, ok = hs.execute("git -C " .. sh(REPO) .. " pull --ff-only -q origin main 2>&1", true)
+  if not ok then
+    local msg = tidy((out or ""):gsub("%s+", " ")):sub(1, 200)
+    if not (M.lastUpdate and M.lastUpdate.err == msg) then   -- 同じ失敗は30分ごとに書かない
+      log("warn: 自動更新の git pull に失敗（手元の変更があるか、ネットに繋がっていない）: " .. msg)
+    end
+    M.lastUpdate = { at = os.time(), why = "git pull に失敗（手元の変更・ネットを確認）", err = msg }
+    return "pullfail"
+  end
+  local src = readAll(SELF)
+  if not src or src == LOADED_SRC or src == _G.__LINE_EXPORT_BAD then
+    M.lastUpdate = { at = os.time(),
+                     why = (src and src == _G.__LINE_EXPORT_BAD) and "新しい版は読み込めないので次の版を待つ" or "新しい版なし" }
+    return "same"
+  end
+  local chunk, err = load(src, "@" .. SELF)
+  if not chunk then
+    _G.__LINE_EXPORT_BAD = src
+    M.lastUpdate = { at = os.time(), why = "新しい版に文法の誤りがあり、読み込まなかった" }
+    log("error: 新しい版に文法の誤りがあるので読み込まない（今の版のまま動く）: " .. tidy(err))
+    return "bad"
+  end
+  log("新しい版を読み込む（" .. why .. "）")
+  _G.__LINE_EXPORT_SRC = src
+  local okc, e = pcall(chunk)
+  if okc then return "reloaded" end
+  -- 新しい版の読み込みに失敗した: 元の版を読み込み直す（タイマーやホットキーを戻す）
+  _G.__LINE_EXPORT_BAD = src
+  log("error: 新しい版の読み込みに失敗したので元の版に戻す: " .. tidy(e))
+  _G.__LINE_EXPORT_SRC = LOADED_SRC
+  local old = load(LOADED_SRC, "@" .. SELF)
+  if old then pcall(old) end
+  return "failed"
 end
 
 -- トーク名の一覧（TARGETS に貼るため）。一覧の列の行だけを読む（トーク欄の
@@ -2023,6 +2079,8 @@ local function maybeRun()
          or (r == "busy" and "手が動いていたので始めなかった")
          or ("始められない: " .. tostring(detail)))
   end
+  -- 書き出した後は、新しい版が来ていれば読み込み直す（直した版で、失敗した分をやり直せるように）
+  if r == "done" or r == "aborted" then selfUpdate("自動実行の後") end
 end
 
 -- 二重読み込み対策。init.lua に dofile 行が複数入っていたり、Reload を
@@ -2030,7 +2088,7 @@ end
 -- （多重になると 07:00 に自動操作が同時に2本走り、LINE の画面を奪い合う）。
 if _G.__LINE_EXPORT then
   local prev = _G.__LINE_EXPORT
-  for _, k in ipairs({ "timer", "waker", "wakeTimer", "diagTimer" }) do
+  for _, k in ipairs({ "timer", "waker", "wakeTimer", "diagTimer", "updater" }) do
     if prev[k] then pcall(function() prev[k]:stop() end) end
   end
   for _, hk in ipairs(prev.hotkeys or {}) do pcall(function() hk:delete() end) end
@@ -2049,6 +2107,7 @@ local function bindBoth(k, fn)
 end
 
 M.timer = hs.timer.doEvery(CHECK_EVERY, maybeRun)
+if AUTO_UPDATE then M.updater = hs.timer.doEvery(UPDATE_EVERY, function() selfUpdate("定期確認") end) end
 M.waker = hs.caffeinate.watcher.new(function(ev)
   local w = hs.caffeinate.watcher
   if ev == w.systemDidWake or ev == w.screensDidUnlock
@@ -2072,7 +2131,7 @@ M._t = {
   pngSize = pngSize, ocr = ocr, capture = capture, stampedName = stampedName,
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
-  statusLines = statusLines, readResult = readResult,
+  statusLines = statusLines, readResult = readResult, selfUpdate = selfUpdate,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,
   VERSION = VERSION,
 }

@@ -25,7 +25,7 @@ Hammerspoon のコンソール（メニューバーの金槌 → Console）に�
 | `__LINE_EXPORT.one("Berry")` | 1件だけ本当に書き出して push |
 | `__LINE_EXPORT.diag()`（`⌘⌥⌃K`） | 画面の読み取り診断。**何も押さない**（最小化された LINE も戻さない）。検索欄・一覧の境目・ヘッダ・⋮ の位置と、TARGETS が一覧に見えるか |
 | `__LINE_EXPORT.names()`（`⌘⌥⌃J`） | 一覧に見えているトーク名を、`TARGETS` に貼れる形で出す（一覧の列だけを読む。会話の中身は出ない） |
-| `__LINE_EXPORT.update()` | 最新の版にする（`git pull` して、うまくいった時だけ読み込み直す。失敗したら理由を出す） |
+| `__LINE_EXPORT.update()` | 今すぐ最新の版にする（`git pull` して、うまくいった時だけ読み込み直す。失敗したら理由を出す）。ふだんは自動更新に任せてよい |
 | `__LINE_EXPORT.help()` | この一覧 |
 
 **`status`・`check`・`one`・`diag` と書き出しのログに出る画面の文字は伏せ字。**
@@ -131,6 +131,16 @@ push する（画面がロック中・使用中・カメラ使用中 など。1�
 無い）、heartbeat に理由を1日1回書き、その日は済みにしない。直れば次の確認で自動で
 始める（`status()` に「始められない（理由）」と出る）。
 
+**自動更新**（2026-10-23 に了承を得て入れた）: 30分ごとと自動実行の後に、GitHub の
+main から `git pull --ff-only` し、`line_export.lua` が変わっていれば読み込み直す。
+直した版が、この Mac で手を動かさずに使われる。
+- 書き出しの実行中・main 以外のブランチでは何もしない
+- 新しい版に文法の誤りがあれば読み込まない。読み込みに失敗したら元の版に戻す
+  （同じ中身では2度試さない。次の版を待つ）
+- 手元で `line_export.lua` を書き換えたままだと `git pull` が失敗し、今の版のまま動く
+  （`status()` に「自動更新: … git pull に失敗」と出る）
+- 止めたい時は `line_export.lua` の `AUTO_UPDATE` を `false` にする
+
 **新しい版を読み込んだ日は**、その日に失敗していたトークだけを、離席した時に
 もう一度試す（版ごとに1回。書き出せたトークは飛ばす）。
 
@@ -228,9 +238,9 @@ local f = io.open(os.getenv("HOME").."/.hammerspoon/init.lua","a"); f:write('\nd
 
 v3 から使っている場合は、`init.lua` にこの行がもう入っているので不要。
 
-**新しい版が main に入ったら**、コンソールで `__LINE_EXPORT.update()`
-（`git pull` して、うまくいった時だけ読み込み直す。失敗したら理由を出す）。
-v4.1 より前の版が動いている時（`update` が無い時）は、代わりに次の1行を貼る:
+**新しい版が main に入ったら**、自動更新が30分以内に取り込む。すぐ使いたい時は
+コンソールで `__LINE_EXPORT.update()`（`git pull` して、うまくいった時だけ読み込み直す）。
+v4.1 より前の版が動いている時（`update` も自動更新も無い時）は、代わりに次の1行を貼る:
 
 ```lua
 local o, ok = hs.execute("git -C ~/Document/line-dump pull --ff-only -q origin main 2>&1", true); print(o); if ok then hs.reload() else hs.alert.show("git pull に失敗（コンソールを見る）", 5) end

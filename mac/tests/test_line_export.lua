@@ -2333,6 +2333,94 @@ test("窓を探している間に人が戻ったら、窓を前に出したり�
   end
 end)
 
+-- ===================== 自動更新（2026-10-23 了承）=====================
+-- スクリプトの写しを読み込む（自動更新は自分のファイルを読み直すので、本物を書き換えないため）
+local SELF_COPY = ROOT .. "/self/line_export.lua"
+local function loadCopy(extra)
+  run("mkdir -p " .. sh(ROOT .. "/self"))
+  writefile(SELF_COPY, readfile(SCRIPT) .. (extra or ""))
+  _G.__LINE_EXPORT, _G.__LINE_EXPORT_BAD, _G.__LINE_EXPORT_SRC = nil, nil, nil
+  return dofile(SELF_COPY)
+end
+local function appendCopy(s) writefile(SELF_COPY, readfile(SELF_COPY) .. s) end
+
+test("自動更新: 新しい版が無ければ git pull だけして、読み込み直さない", function()
+  reset()
+  local M = loadCopy()
+  check(M._t.selfUpdate("テスト") == "same" and W.pulled, "pull して変わらず")
+  check(_G.__LINE_EXPORT == M, "読み込み直していない")
+  W.logs = {}; M.status()
+  check(table.concat(W.logs, "\n"):find("自動更新: オン（30 分ごとに GitHub の main を見る）。最後: %d+:%d+ 新しい版なし"),
+    "status に出す:\n" .. table.concat(W.logs, "\n"))
+end)
+
+test("自動更新: 新しい版が来たら読み込み直し、版が変わる", function()
+  reset()
+  local M = loadCopy()
+  local old = M._t.VERSION
+  appendCopy("\n-- 直した版\n")
+  check(M._t.selfUpdate("テスト") == "reloaded", "読み込み直した")
+  local M2 = _G.__LINE_EXPORT
+  check(M2 ~= M and M2._t.VERSION ~= old, "新しい版: " .. tostring(M2 and M2._t.VERSION))
+  local again = loadCopy(readfile(SELF_COPY):sub(#readfile(SCRIPT) + 1))
+  check(again._t.VERSION == M2._t.VERSION, "版はファイルの中身から作る（普通に読み込んだ時と同じ）")
+  check(M2._t.selfUpdate("テスト") == "same", "読み込んだ後は同じ版")
+end)
+
+test("自動更新: 新しい版に文法の誤りがあれば読み込まず、今の版のまま動く（同じ中身では2度試さない）", function()
+  reset()
+  local M = loadCopy()
+  appendCopy("\nthis is not lua (\n")
+  W.logs = {}
+  check(M._t.selfUpdate("テスト") == "bad" and _G.__LINE_EXPORT == M, "読み込まない")
+  check(table.concat(W.logs, "\n"):find("文法の誤り", 1, true), "ログに残す")
+  check(M._t.selfUpdate("テスト") == "same" and _G.__LINE_EXPORT == M, "同じ中身は2度試さない")
+end)
+
+test("自動更新: 新しい版の読み込みに失敗したら、元の版に戻す", function()
+  reset()
+  local M = loadCopy()
+  local old = M._t.VERSION
+  -- 読み込みの最後（return M の前）で失敗する版
+  local src = readfile(SELF_COPY)
+  writefile(SELF_COPY, (src:gsub("\nreturn M%s*$", "\nerror('新しい版の読み込みで失敗')\nreturn M\n")))
+  W.logs = {}
+  check(M._t.selfUpdate("テスト") == "failed", "失敗を返す")
+  local M2 = _G.__LINE_EXPORT
+  check(M2 and M2._t and M2._t.VERSION == old, "元の版で動いている: " .. tostring(M2 and M2._t and M2._t.VERSION))
+  check(table.concat(W.logs, "\n"):find("元の版に戻す", 1, true), "ログに残す")
+  check(M2._t.selfUpdate("テスト") == "same", "同じ中身は2度試さない")
+end)
+
+test("自動更新: 書き出しの実行中・main 以外のブランチでは何もしない", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = loadCopy()
+  local app = assert(M._t.prepareApp())
+  M._t.beginRun(app)
+  check(M._t.selfUpdate("テスト") == "skip" and not W.pulled, "実行中は何もしない")
+  M._t.endRun()
+  reset({ knobs = { branch = "try-v4" } })
+  M = loadCopy()
+  check(M._t.selfUpdate("テスト") == "notmain" and not W.pulled, "main 以外では pull しない")
+end)
+
+test("自動更新: git pull に失敗しても今の版のまま動き、同じ失敗は1回だけログに書く", function()
+  reset({ knobs = { pullFails = true } })
+  local M = loadCopy()
+  W.logs = {}
+  check(M._t.selfUpdate("テスト") == "pullfail" and M._t.selfUpdate("テスト") == "pullfail", "pullfail")
+  local n = 0
+  for _, l in ipairs(W.logs) do if l:find("自動更新の git pull に失敗", 1, true) then n = n + 1 end end
+  check(n == 1 and _G.__LINE_EXPORT == M, "1回だけ: " .. n)
+end)
+
+test("自動更新: 自動実行の後にも新しい版を確かめる", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = loadCopy()
+  at9am(function() M._t.maybeRun() end)
+  check(W.saved and W.pulled, "書き出した後に pull した")
+end)
+
 run("rm -rf " .. sh(ROOT))
 realprint(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)
