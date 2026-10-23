@@ -10,6 +10,8 @@
 --     2. トーク  左の一覧に名前がそのまま見えていればその行を押す。見えなければ
 --                検索欄に名前を入れ、出てきた行を押す
 --                → ヘッダ（検索欄と同じ高さ）を OCR してトーク名を確認
+--                （LINE が AX で教える検索欄の位置は、フルスクリーンか窓かで画面と
+--                ずれるので、毎回その場で検索欄の文字を OCR して画面の位置に直す）
 --     3. メニュー ⋮（窓右端−24, ヘッダのトーク名と同じ高さ）を押す
 --                → OCR で「トークを保存」を探して押す（型指定・較正は不要）
 --     4. 保存    保存シートを AX で待つ → →キー＋「_YYYYMMDD」→ 保存 →（置き換え）
@@ -48,8 +50,8 @@ local OUT_DIR = os.getenv("LINE_DUMP_RAW_DIR") or (HOME ..
 -- 一覧に名前がそのまま見えていればその行を、見えなければ検索欄に入れて
 -- 絞り込んだ行を、画面に出た名前と照合してから開く。照合は絵文字・空白・
 -- グループのメンバー数を無視する。一覧からは完全一致の行だけを開く。検索では
--- 完全一致の行があればそれを開き、無い時だけ部分一致を使うが、候補が2つ以上
--- あれば決めずに止める。開いたらヘッダで確かめ、保存名は完全一致を求める
+-- 完全一致の行があればそれを開き、無い時だけ部分一致の行を余分な字が少ない順に
+-- 3つまで開く。開いたらヘッダで確かめ、保存名は完全一致を求める（違えば保存せず次へ）
 -- （別トークを書き出さないため）。名前は LINE の表示どおりに書くのが確実（⌘⌥⌃J で一覧）。
 local TARGETS = {
   "オーチュー/小林央忠",
@@ -81,6 +83,9 @@ local L = {
   HEADER_DY       = 16,   -- ヘッダのトーク名は検索欄と同じ高さ（±この幅）にある
   MENU_W          = 360,  -- ⋮ から左へこの幅・下へ MENU_H をメニューの範囲とみなす
   MENU_H          = 520,
+  -- LINE が AX で教える位置と画面に写る位置のずれは毎回測る（窓の出し方で
+  -- 変わる）。この幅より大きいずれは測り違いとみなす
+  SHIFT_MAX       = 80,
 }
 -- ▲
 
@@ -733,14 +738,100 @@ local function ensureWindow(app)
   return nil
 end
 
+-- ---------- AX の位置と画面のずれ ----------
+-- LINE が AX で教える検索欄・一覧のセルの位置は、窓の出し方によって画面に
+-- 写る位置とずれる（2026-10-23 の実機: フルスクリーンで、検索欄が見た目より
+-- 30pt 下にあると報告された。窓表示ではずれないこともある）。押す位置と OCR は
+-- 画面の位置で考えるので、毎回その場で検索欄に入っている文字（空なら「検索」の
+-- 表示、それも読めなければ一覧のセルの名前）を OCR で探し、AX の位置との差
+-- （dy）を測ってから AX の位置に足す。測れない時は同じ窓の形で前に測った値、
+-- それも無ければ 0（ずれ無し）とみなす。横（x）はずれていなかった。
+local SHIFT                                     -- 前に測った値 { memo, dy, how }
+local PLACEHOLDERS = { "検索", "Search" }
+local function shifted(r, dy)
+  return { x = r.x, y = r.y + (dy or 0), w = r.w, h = r.h }
+end
+
+-- 検索欄の文字が OCR で読めたか。虫眼鏡のアイコンが字として前に付く・1〜2字を
+-- 読み違えることがある（実機）ので、含んでいるか、6割以上の字が同じなら同じとみなす。
+-- v, n は norm 済み
+local function sameText(v, n)
+  local vl, nl = utf8.len(v) or 0, utf8.len(n) or 0
+  if vl == 0 or nl == 0 or nl > vl + 4 then return false end
+  if n:find(v, 1, true) then return true end
+  local want, have = {}, 0
+  for _, c in utf8.codes(v) do want[c] = (want[c] or 0) + 1 end
+  for _, c in utf8.codes(n) do
+    if (want[c] or 0) > 0 then want[c] = want[c] - 1; have = have + 1 end
+  end
+  return have >= math.max(2, math.ceil(vl * 0.6))
+end
+
+local function measureShift(win, field, ffAX, items)
+  local cy = ffAX.y + ffAX.h / 2
+  local v = norm(attr(field, "AXValue") or "")
+  -- 1) 検索欄の文字。一覧の行に同じ名前があっても、検索欄はその上なので一番上の物
+  local best
+  for _, it in ipairs(items) do
+    if it.x >= ffAX.x - 10 and it.x <= ffAX.x + ffAX.w + 10 and math.abs(it.y - cy) <= L.SHIFT_MAX
+       and (v ~= "" and sameText(v, it.n) or v == "" and isLabel(it.n, PLACEHOLDERS))
+       and (not best or it.y < best.y) then
+      best = it
+    end
+  end
+  if best then return best.y - cy, v ~= "" and "検索欄の文字" or "検索欄の「検索」の表示" end
+  -- 2) 一覧のセルの名前（AX の文字の位置と、同じ文字の OCR の位置の差。2つ以上が合う時だけ）
+  local diffs = {}
+  for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
+                               function(e) return role(e) == "AXCell" end, 4000)) do
+    local t = bfs(cell, function(e)
+      return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
+    end, 40)
+    local tr, tn = t and axFrame(t), t and norm(attr(t, "AXValue"))
+    if tr and tn and (utf8.len(tn) or 0) >= 2 and tr.x < ffAX.x + ffAX.w then
+      local hit
+      for _, it in ipairs(items) do
+        if it.n == tn and it.x >= tr.x - 20 and it.x <= tr.x + tr.w + 20
+           and math.abs(it.y - (tr.y + tr.h / 2)) <= L.SHIFT_MAX then
+          if hit then hit = false; break end    -- 近くに同じ名前が2つ → どちらか分からない
+          hit = it
+        end
+      end
+      if hit then diffs[#diffs + 1] = hit.y - (tr.y + tr.h / 2) end
+    end
+  end
+  if #diffs >= 2 then
+    table.sort(diffs)
+    local mid, agree = diffs[(#diffs + 1) // 2], 0
+    for _, d in ipairs(diffs) do if math.abs(d - mid) <= 6 then agree = agree + 1 end end
+    if agree * 2 > #diffs then return mid, "一覧のセルの名前 " .. agree .. " 個" end
+  end
+  return nil
+end
+
+-- AX の位置に足すずれ（dy）と、どう決めたか
+local function axShift(win, field, ffAX, items)
+  local f = win:frame()
+  local memo = string.format("%.0f:%.0f:%.0f:%.0f", f.x, f.y, f.w, f.h)
+  local dy, how = measureShift(win, field, ffAX, items or {})
+  if dy then
+    SHIFT = { memo = memo, dy = dy, how = how }
+    return dy, how
+  end
+  if SHIFT and SHIFT.memo == memo then return SHIFT.dy, "前に測った値（" .. SHIFT.how .. "）" end
+  return 0, "測れず、ずれ無しとみなした"
+end
+
 -- ---------- 2. トークを開いて確かめる ----------
 -- 左ペインの AX のセル（トーク名が載っている）。名前が合わないセルも枠ごと返す
 -- （OCR で見えた候補がどのセルの中か＝どの行かを数えるのに使う）。
-local function rowsByAX(win, paneX, below)
+-- 位置は画面の位置（AX の位置に dy を足した物。below も画面の位置）。
+local function rowsByAX(win, paneX, below, dy)
   local rows, wf = {}, win:frame()
   for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
                                function(e) return role(e) == "AXCell" end, 4000)) do
     local r = axFrame(cell)
+    if r then r = shifted(r, dy) end
     local t = bfs(cell, function(e)
       return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
     end, 40)
@@ -782,8 +873,11 @@ local function listRight(win, ff)
   local x, how, n = nil, nil, 0
   for _, cell in ipairs(bfsAll(root, function(e) return role(e) == "AXCell" end, 4000)) do
     local r = axFrame(cell)
-    -- トーク欄のメッセージのセルは検索欄より右から始まるので数えない
-    if r and r.x < ff.x + ff.w and r.y > ff.y and r.x + r.w < f.x + f.w * 0.7 then
+    -- トーク欄のメッセージのセルは検索欄より右から始まるので数えない。
+    -- 幅の無い・検索欄の真ん中より左で終わるセルも数えない（実機で、検索結果の
+    -- 画面に右端 x=0 のセルが1個だけあり、境目を x=0 と取り違えて全件を見失った）
+    if r and r.w >= 40 and r.h >= 10 and r.x < ff.x + ff.w and r.y > ff.y
+       and r.x + r.w > ff.x + ff.w / 2 and r.x + r.w < f.x + f.w * 0.7 then
       n = n + 1; x = math.max(x or 0, r.x + r.w)
     end
   end
@@ -803,11 +897,13 @@ local function listRight(win, ff)
 end
 
 -- 名前の行の候補を選ぶ。完全一致の行があればそれ（2行以上あれば上から順に）。
--- 無ければ部分一致だが、候補が2行以上なら決めずに止める（例: 「かにっこにー」の
--- 行を OCR が少し読み違え、「かにっこにー3」と並んだ時）。候補は「行」で数える:
--- OCR で見えた候補はそれを含む AX のセル（無ければ縦に 30pt 以内でまとめた行）、
--- AX のセルはそのセル。同じ行の名前とプレビューは1つ、AX と OCR の片方にしか
--- 見えない行も1つとして数える。
+-- 無ければ部分一致の行を、名前より余分な字が少ない順に並べる（名前の絵文字を
+-- OCR が1〜2字に読む「パプリカ🌶️」が、別のトーク「パプリカ○○会」より先）。
+-- 部分一致の行は別のトークかもしれないが、開いた後の保存ダイアログで保存名が
+-- 名前と完全に同じかを確かめ、違えば保存せずに次の候補へ進む（exportSteps）。
+-- 候補は「行」で数える: OCR で見えた候補はそれを含む AX のセル（無ければ縦に
+-- 30pt 以内でまとめた行）、AX のセルはそのセル。同じ行の名前とプレビューは1つ、
+-- AX と OCR の片方にしか見えない行も1つとして数える。
 -- OCR で見えた行はその位置を押し、AX にしか見えない行はそのセルを押す（el）。
 -- 返す行には、ヘッダ照合用にその行の OCR の文字（ocrN）も持たせる。
 local function pickRows(ctx, win, items, ff, paneX)
@@ -821,7 +917,7 @@ local function pickRows(ctx, win, items, ff, paneX)
   end
   local cells = {}
   if top < 3 then
-    cells = rowsByAX(win, paneX, ff.y + ff.h)
+    cells = rowsByAX(win, paneX, ff.y + ff.h, ctx.dy)
     for _, c in ipairs(cells) do c.sc = score(ctx.tn, c.n); top = math.max(top, c.sc) end
   end
   if top == 0 then return nil end
@@ -850,11 +946,16 @@ local function pickRows(ctx, win, items, ff, paneX)
       for _, it in ipairs(items) do
         if inside(it, c.f) and (not o or it.y < o.y) then o = it end
       end
-      rowFor("cell" .. i, { x = c.x, y = c.y, el = c.el, ocrN = o and o.n })
+      rowFor("cell" .. i, { x = c.x, y = c.y, el = c.el, ocrN = o and o.n, axN = c.n })
     end
   end
-  if top < 3 and #rows > 1 then return nil, top, #rows end
+  local tl = utf8.len(ctx.tn) or 0
+  for _, r in ipairs(rows) do
+    local n = (top < 3 and r.axN) or r.ocrN or r.axN or ""
+    r.extra = (utf8.len(countless(n)) or 99) - tl
+  end
   table.sort(rows, function(a, b)
+    if top < 3 and a.extra ~= b.extra then return a.extra < b.extra end
     if (a.byOCR == true) ~= (b.byOCR == true) then return a.byOCR == true end
     return a.y < b.y
   end)
@@ -935,13 +1036,14 @@ end
 -- 検索欄に名前を入れる。フォーカスが入ったと確かめられない時はキーを送らない
 -- （前のトークのメッセージ入力欄に名前を貼ってしまわないように）。
 -- フォーカスが入らないと分かった時だけ false。
-local function typeName(ctx, field, ff)
+-- ffAX は AX の枠（フォーカスの確認用）、ff は画面の位置（押す所）。
+local function typeName(ctx, field, ffAX, ff)
   guard()
   pcall(function() field:setAttributeValue("AXFocused", true) end); wait(0.2)
-  local focused = fieldFocused(field, ff)
+  local focused = fieldFocused(field, ffAX)
   if focused ~= true then
-    clickAt(ff.x + ff.w / 2, ff.y + ff.h / 2); wait(0.3)   -- 位置は AX の枠から
-    focused = fieldFocused(field, ff)
+    clickAt(ff.x + ff.w / 2, ff.y + ff.h / 2); wait(0.3)   -- 画面の位置（AX の枠＋ずれ）
+    focused = fieldFocused(field, ffAX)
   end
   if focused == false then return false end
   if focused then
@@ -958,13 +1060,25 @@ local function typeName(ctx, field, ff)
   return true
 end
 
+-- 画面を撮って読み、AX の位置と画面のずれを測り直す（窓の出し方で変わるので
+-- 読むたびに）。ctx.ff（画面の位置の検索欄）と ctx.dy を更新する。
+local function readList(ctx, win, field, ffAX)
+  local cap = capture(win, "list")
+  local items, oerr = ocr(cap)
+  if not items then return nil, cap, oerr end
+  local dy, how = axShift(win, field, ffAX, items)
+  if dy ~= ctx.dy then
+    note(ctx, "位置", string.format("LINE が教える検索欄の位置と画面のずれ %+.0fpt（%s）", dy, how))
+  end
+  ctx.dy, ctx.ff = dy, shifted(ffAX, dy)
+  return items, cap
+end
+
 local function openChat(ctx, win)
-  local field, ff = searchField(win)
-  if not ff then return fail(ctx, "検索欄", "検索欄が見つからない") end
-  local paneX, how = listRight(win, ff)
-  ctx.ff, ctx.paneX = ff, paneX
-  note(ctx, "一覧", string.format("検索欄 x=%.0f〜%.0f y=%.0f / 一覧とトーク欄の境目 x=%.0f（%s）",
-    ff.x, ff.x + ff.w, ff.y + ff.h / 2, paneX, how))
+  local field, ffAX = searchField(win)
+  if not ffAX then return fail(ctx, "検索欄", "検索欄が見つからない") end
+  local paneX, how = listRight(win, ffAX)
+  ctx.paneX = paneX
 
   -- 行を押して、ヘッダで確かめる
   local function open(row, top, via)
@@ -974,7 +1088,7 @@ local function openChat(ctx, win)
       clickAt(row.x, row.y)
     end
     wait(1.2)
-    local hdr, why, cap, seen = confirmHeader(ctx, win, ff, paneX, row, top)
+    local hdr, why, cap, seen = confirmHeader(ctx, win, ctx.ff, paneX, row, top)
     if hdr then
       note(ctx, "トーク確認", string.format("%sを押して開き、ヘッダ（y=%.0f）で %s を確かめた",
         via, hdr.y, masked(hdr.text)))
@@ -983,15 +1097,18 @@ local function openChat(ctx, win)
     return nil, why, cap, seen
   end
 
+  local items, cap, oerr = readList(ctx, win, field, ffAX)
+  if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
+  local ff = ctx.ff
+  note(ctx, "一覧", string.format("検索欄 x=%.0f〜%.0f y=%.0f / 一覧とトーク欄の境目 x=%.0f（%s）",
+    ff.x, ff.x + ff.w, ff.y + ff.h / 2, paneX, how))
+
   -- 1) 今の一覧に名前がそのまま（完全一致で）見えていれば、検索せずに押す。
   --    検索欄が空（普段の一覧）の時だけ。前の件の検索結果には「メッセージ」の
   --    行なども並び、そこから開くと古い所が開くので使わない
-  local cap, items, oerr, rows, top, many
+  local rows, top
   if norm(attr(field, "AXValue") or "") == "" then
-    cap = capture(win, "list")
-    items, oerr = ocr(cap)
-    if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
-    rows, top, many = pickRows(ctx, win, items, ff, paneX)
+    rows, top = pickRows(ctx, win, items, ff, paneX)
   end
   if rows and top == 3 then
     note(ctx, "トーク選択", "今の一覧に見えていた（検索しない）")
@@ -1002,33 +1119,38 @@ local function openChat(ctx, win)
   end
 
   -- 2) 検索欄に名前を入れ、出てきた行を押す
-  if not typeName(ctx, field, ff) then
+  if not typeName(ctx, field, ffAX, ctx.ff) then
     return fail(ctx, "検索欄", "検索欄にフォーカスが入らない（キー入力はしていない）")
   end
   for i = 1, 2 do                                -- 検索結果の表示が遅れることがある
-    cap = capture(win, "list")
-    items, oerr = ocr(cap)
+    items, cap, oerr = readList(ctx, win, field, ffAX)
     if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
-    rows, top, many = pickRows(ctx, win, items, ff, paneX)
-    if rows or many or i == 2 then break end     -- 候補が複数なら待っても変わらない
+    rows, top = pickRows(ctx, win, items, ctx.ff, paneX)
+    if rows or i == 2 then break end
     wait(1.0)
   end
-  if not rows then
-    if many then
-      return fail(ctx, "トーク選択", "名前に合う候補が " .. many .. " 件あり決められない" ..
-        "（TARGETS の名前を LINE の表示どおりに）", cap)
-    end
-    return fail(ctx, "トーク選択", "一覧にも検索結果にも名前が見えない", cap)
-  end
-  note(ctx, "トーク選択", "検索して見つけた（" .. (top == 3 and "完全一致" or "部分一致") .. "）")
+  if not rows then return fail(ctx, "トーク選択", "一覧にも検索結果にも名前が見えない", cap) end
+  note(ctx, "トーク選択", "検索して見つけた（" .. (top == 3 and "完全一致" or
+    ("部分一致 " .. #rows .. " 件。保存名で本人か確かめる")) .. "）")
+  -- 候補を順に開く。完全一致が2行あれば2行目も、部分一致は3行まで試す。
+  -- 開けた時は、次の候補を開く関数（st.next）も返す: 保存名が名前と違った
+  -- （別のトークだった）時に exportSteps が次の候補へ進むため
+  local k, last = 0, math.min(#rows, top == 3 and 2 or 3)
   local hcap, seen
-  for k = 1, math.min(#rows, 2) do               -- 完全一致が2行あれば2行目も試す
-    local st, why
-    st, why, hcap, seen = open(rows[k], top, "検索結果の行")
-    if st then return st end
-    if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
+  local function nextRow()
+    while k < last do
+      k = k + 1
+      local st, why
+      st, why, hcap, seen = open(rows[k], top, "検索結果の行")
+      if st then
+        if k < last then st.next = nextRow end
+        return st
+      end
+      if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
+    end
+    return fail(ctx, "トーク確認", "開いたトークが違う（またはヘッダの名前が読めない）", hcap, seen)
   end
-  return fail(ctx, "トーク確認", "開いたトークが違う（またはヘッダの名前が読めない）", hcap, seen)
+  return nextRow()
 end
 
 -- ---------- 3. ⋮ →「トークを保存」 ----------
@@ -1178,7 +1300,9 @@ local function saveAndMove(ctx, app, st)
   end
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
   if not nameMatches(cur, ctx.name) then
-    return failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
+    local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
+    e.otherChat = true                            -- 別のトークだった（次の候補があれば試す）
+    return nil, e
   end
   if ctx.dry then
     -- 確認だけ（check）: 保存名まで確かめたら、何も打たずにキャンセルする
@@ -1286,10 +1410,19 @@ local function exportSteps(app, ctx)
   note(ctx, "窓", string.format("メイン窓（x=%.0f y=%.0f %.0f×%.0f）を前面にした", f.x, f.y, f.w, f.h))
   local st, e = openChat(ctx, win)
   if not st then return false, e end
-  local ok; ok, e = pressSaveChat(ctx, win, st)
-  if not ok then return false, e end
-  local dst; dst, e = saveAndMove(ctx, app, st)
-  if not dst then return false, e end
+  local dst
+  while true do
+    local ok; ok, e = pressSaveChat(ctx, win, st)
+    if not ok then return false, e end
+    dst, e = saveAndMove(ctx, app, st)
+    if dst then break end
+    -- 部分一致で開いたのが別のトークだった（保存名が違った）→ 保存せずに次の候補を開く
+    if not (e.otherChat and st.next) then return false, e end
+    note(ctx, "保存ダイアログ", "別のトークだった（" .. e.detail .. "）ので、保存せずに次の候補を開く")
+    local st2 = st.next()
+    if not st2 then return false, e end           -- 次の候補も合わない: 保存名が違ったことを返す
+    st = st2
+  end
   if dst == "dry" then return true, "（確認だけ。保存はしていない）" end
   note(ctx, "保存", "保存して Linetxt に置いた（" .. (dst:match("[^/]+$") or dst) .. "）")
   return true, dst
@@ -1852,15 +1985,21 @@ function M.diag(quiet)
   local items, oerr = ocr(cap)
   if not items then out("OCR 診断: " .. tostring(oerr)); return finish(oerr) end
   local f = win:frame()
-  local field, ff = searchField(win)
-  local paneX, how
-  if ff then paneX, how = listRight(win, ff) end
+  local field, ffAX = searchField(win)
+  local paneX, how, ff, dy, dyHow
+  if ffAX then
+    paneX, how = listRight(win, ffAX)
+    dy, dyHow = axShift(win, field, ffAX, items)
+    ff = shifted(ffAX, dy)
+  end
   out("=== LINE 診断（" .. VERSION .. "。伏せ字: TARGETS の名前と LINE の決まった表示以外は ■n字）===")
   out(string.format("画面収録: %s / 窓 x=%.0f y=%.0f w=%.0f h=%.0f / 読めた文字 %d 件",
     screenRecordingOK() and "許可" or "未許可", f.x, f.y, f.w, f.h, #items))
   if ff then
     out(string.format("検索欄 x=%.0f〜%.0f y=%.0f（中身: %s）", ff.x, ff.x + ff.w, ff.y + ff.h / 2,
       masked(attr(field, "AXValue") or "")))
+    out(string.format("LINE が教える位置と画面のずれ %+.0fpt（%s。AX では y=%.0f）", dy, dyHow,
+      ffAX.y + ffAX.h / 2))
     out(string.format("一覧とトーク欄の境目 x=%.0f（%s）", paneX, how))
     local hrow = headerRow(items, paneX, f, win:title(), ff)
     out(headerSeen(hrow))
@@ -1868,7 +2007,7 @@ function M.diag(quiet)
       out(string.format("⋮ を押す位置（推定）x=%.0f y=%.0f", f.x + f.w - L.MENU_FROM_RIGHT, hrow[1].y))
     end
     out("TARGETS が今の一覧に見えるか:")
-    local cells = rowsByAX(win, paneX, ff.y + ff.h)
+    local cells = rowsByAX(win, paneX, ff.y + ff.h, dy)
     for _, t in ipairs(TARGETS) do
       local name = targetName(t)
       local tn, where = norm(name), nil
@@ -2140,6 +2279,7 @@ bindBoth("J", function() M.names() end)                       -- トーク名を
 -- テスト用（mac/tests/test_line_export.lua から中身を検証する）
 M._t = {
   norm = norm, score = score, loose = loose, isSaveLabel = isSaveLabel, countless = countless,
+  sameText = sameText,
   nameMatches = nameMatches, masked = masked, maskedSave = maskedSave,
   pngSize = pngSize, ocr = ocr, capture = capture, stampedName = stampedName,
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
