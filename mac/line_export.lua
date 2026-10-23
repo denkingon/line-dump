@@ -75,10 +75,6 @@ local RUN_AT = "07:00"
 --   一覧の AX のセルから割り出すので、窓の大きさが変わっても測り直しは要らない。
 local L = {
   MENU_FROM_RIGHT = 24,   -- ⋮ は窓右端から 24pt 左・ヘッダのトーク名と同じ高さ
-  -- ⋮ でメニューが出なかった時の再試行（1回だけ）。左へ大きくずらすと
-  -- 隣の通話ボタンに当たりうるので、ずらし幅は小さくしておく。
-  MENU_RETRY_DX   = -6,
-  MENU_RETRY_DY   = 6,
   HEADER_H        = 130,  -- 窓の上端からこの高さまでをヘッダとみなす
   HEADER_DY       = 16,   -- ヘッダのトーク名は検索欄と同じ高さ（±この幅）にある
   MENU_W          = 360,  -- ⋮ から左へこの幅・下へ MENU_H をメニューの範囲とみなす
@@ -1043,7 +1039,9 @@ local function headerMatches(hrow, tn, row, top)
     local sc = score(tn, it.n)
     if sc > bs then best, bs = it, sc end
   end
-  if best and bs >= top then return best end
+  -- 完全一致の行を押しても、ヘッダは前方一致まででよい（名前の絵文字を OCR が別の字に
+  -- 読む。別のトークだった時は、保存名の完全一致の確かめで止まる）
+  if best and bs >= math.min(top, 2) then return best end
   if row.ocrN then
     local rc = countless(row.ocrN)
     for _, it in ipairs(hrow or {}) do
@@ -1071,6 +1069,13 @@ local function confirmHeader(ctx, win, ff, paneX, row, top)
     local items, oerr = ocr(cap)
     if not items then return nil, "ocr", cap, oerr end
     local hrow = headerRow(items, paneX, f, win:title(), ff)
+    -- 保存名で別のトークと分かったヘッダは数えない（次の候補を押しても開かなかった時に、
+    -- 前のトークのヘッダで「開いた」としない）
+    if hrow and ctx.badHeaders then
+      local keep = {}
+      for _, it in ipairs(hrow) do if not ctx.badHeaders[it.n] then keep[#keep + 1] = it end end
+      hrow = keep
+    end
     local hdr = headerMatches(hrow, ctx.tn, row, top)
     if hdr then return hdr end
     if now() >= limit then return nil, "mismatch", cap, headerSeen(hrow) end
@@ -1341,47 +1346,52 @@ local function openChat(ctx, win)
   if norm(attr(field, "AXValue") or "") == "" then
     rows, top = pickRows(ctx, win, items, ff, paneX)
   end
+  -- 2) 検索欄に名前を入れ、出てきた行を押す（一覧の行が別のトークだった時もここへ）
+  local function bySearch()
+    if not typeName(ctx, field, ffAX, ctx.ff) then
+      return fail(ctx, "検索欄", "検索欄にフォーカスが入らない（キー入力はしていない）")
+    end
+    for i = 1, 2 do                                -- 検索結果の表示が遅れることがある
+      items, cap, oerr = readList(ctx, win, field, ffAX)
+      if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
+      rows, top = pickRows(ctx, win, items, ctx.ff, paneX)
+      if rows or i == 2 then break end
+      wait(1.0)
+    end
+    if not rows then return fail(ctx, "トーク選択", "一覧にも検索結果にも名前が見えない", cap) end
+    note(ctx, "トーク選択", "検索して見つけた（" .. (top == 3 and "完全一致" or
+      ("部分一致 " .. #rows .. " 件。保存名で本人か確かめる")) .. "）")
+    -- 候補を順に開く。完全一致が2行あれば2行目も、部分一致は3行まで試す。
+    -- 開けた時は、次の候補を開く関数（st.next）も返す: 保存名が名前と違った
+    -- （別のトークだった）時に exportSteps が次の候補へ進むため
+    local k, last = 0, math.min(#rows, top == 3 and 2 or 3)
+    local hcap, seen
+    local function nextRow()
+      while k < last do
+        k = k + 1
+        local st, why
+        st, why, hcap, seen = open(rows[k], top, "検索結果の行")
+        if st then
+          if k < last then st.next = nextRow end
+          return st
+        end
+        if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
+      end
+      return fail(ctx, "トーク確認", "開いたトークが違う（またはヘッダの名前が読めない）", hcap, seen)
+    end
+    return nextRow()
+  end
+
   if rows and top == 3 then
     note(ctx, "トーク選択", "今の一覧に見えていた（検索しない）")
     local st, why, hcap, seen = open(rows[1], top, "一覧の行")
-    if st then return st end
+    -- 保存名で別のトークと分かったら（「かにっこにー (2)」は名前の照合ではメンバー数を
+    -- 除いて完全一致になる）、検索して探し直す
+    if st then st.next = bySearch; return st end
     if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
     log("一覧の行では " .. ctx.name .. " を確かめられなかったので、検索して開き直す（" .. seen .. "）")
   end
-
-  -- 2) 検索欄に名前を入れ、出てきた行を押す
-  if not typeName(ctx, field, ffAX, ctx.ff) then
-    return fail(ctx, "検索欄", "検索欄にフォーカスが入らない（キー入力はしていない）")
-  end
-  for i = 1, 2 do                                -- 検索結果の表示が遅れることがある
-    items, cap, oerr = readList(ctx, win, field, ffAX)
-    if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
-    rows, top = pickRows(ctx, win, items, ctx.ff, paneX)
-    if rows or i == 2 then break end
-    wait(1.0)
-  end
-  if not rows then return fail(ctx, "トーク選択", "一覧にも検索結果にも名前が見えない", cap) end
-  note(ctx, "トーク選択", "検索して見つけた（" .. (top == 3 and "完全一致" or
-    ("部分一致 " .. #rows .. " 件。保存名で本人か確かめる")) .. "）")
-  -- 候補を順に開く。完全一致が2行あれば2行目も、部分一致は3行まで試す。
-  -- 開けた時は、次の候補を開く関数（st.next）も返す: 保存名が名前と違った
-  -- （別のトークだった）時に exportSteps が次の候補へ進むため
-  local k, last = 0, math.min(#rows, top == 3 and 2 or 3)
-  local hcap, seen
-  local function nextRow()
-    while k < last do
-      k = k + 1
-      local st, why
-      st, why, hcap, seen = open(rows[k], top, "検索結果の行")
-      if st then
-        if k < last then st.next = nextRow end
-        return st
-      end
-      if why == "ocr" then return fail(ctx, "OCR", "OCR が動かない", hcap, seen) end
-    end
-    return fail(ctx, "トーク確認", "開いたトークが違う（またはヘッダの名前が読めない）", hcap, seen)
-  end
-  return nextRow()
+  return bySearch()
 end
 
 -- ---------- 3. ⋮ →「トークを保存」 ----------
@@ -1406,9 +1416,20 @@ local function pressSaveChat(ctx, win, st)
   local baseCap = capture(win, "premenu", screenOf(win))
   local base, oerr = ocr(baseCap)
   if not base then return fail(ctx, "OCR", "OCR が動かない", baseCap, oerr) end
+  -- 押す所: まず窓の右端から L.MENU_FROM_RIGHT。メニューが出なければ、押す前の画面で
+  -- ヘッダの高さの右端に読めた ⋮（1〜2字）を1回だけ押す。1回目より 8pt を超えて左の
+  -- 物は隣のボタン（通話など）かもしれないので押さない。読めなければ押し直さない
+  local spots, icon = { { x = dotsX, y = st.header.y } }, nil
+  for _, it in ipairs(base) do
+    if math.abs(it.y - st.header.y) <= 10 and it.x >= dotsX - 8 and it.x <= f.x + f.w
+       and (utf8.len(it.text) or 9) <= 2 and (not icon or it.x > icon.x) then icon = it end
+  end
+  if icon and (math.abs(icon.x - dotsX) > 2 or math.abs(icon.y - st.header.y) > 2) then
+    spots[2] = { x = icon.x, y = icon.y }
+  end
   local lastCap, opened = baseCap, false
-  for i, d in ipairs({ { 0, 0 }, { L.MENU_RETRY_DX, L.MENU_RETRY_DY } }) do
-    clickAt(dotsX + d[1], st.header.y + d[2]); wait(0.8)
+  for i, p in ipairs(spots) do
+    clickAt(p.x, p.y); wait(0.8)
     lastCap = capture(win, "menu" .. i, screenOf(win))
     local items, oerr2 = ocr(lastCap)
     if not items then return fail(ctx, "OCR", "OCR が動かない", lastCap, oerr2) end
@@ -1421,7 +1442,7 @@ local function pressSaveChat(ctx, win, st)
       end
     end
     if hit then
-      note(ctx, "メニュー", string.format("⋮（x=%.0f y=%.0f）→「トークを保存」を押した", dotsX + d[1], st.header.y + d[2]))
+      note(ctx, "メニュー", string.format("⋮（x=%.0f y=%.0f）→「トークを保存」を押した", p.x, p.y))
       clickAt(hit.x, hit.y); return true
     end
     -- 開いたのに目的の項目が無い → ヘッダのトーク名を押して閉じる
@@ -1631,19 +1652,27 @@ local function exportSteps(app, ctx)
   note(ctx, "窓", string.format("メイン窓（x=%.0f y=%.0f %.0f×%.0f）を前面にした", f.x, f.y, f.w, f.h))
   local st, e = openChat(ctx, win)
   if not st then return false, e end
-  local dst
+  local dst, rejected = nil, {}
   while true do
     local ok; ok, e = pressSaveChat(ctx, win, st)
     if not ok then return false, e end
     dst, e = saveAndMove(ctx, app, st)
     if dst then break end
-    -- 部分一致で開いたのが別のトークだった（保存名が違った）→ 保存せずに次の候補を開く
-    if not (e.otherChat and st.next) then return false, e end
+    -- 開いたのが別のトークだった（保存名が違った）→ 保存せずに次の候補を開く。
+    -- 保存ダイアログが閉じていなければ進まない（次の行を押しても効かない）
+    if not (e.otherChat and st.next) or findSheet(app) then return false, e end
     note(ctx, "保存ダイアログ", "別のトークだった（" .. e.detail .. "）ので、保存せずに次の候補を開く")
-    local st2 = st.next()
-    if not st2 then return false, e end           -- 次の候補も合わない: 保存名が違ったことを返す
+    ctx.badHeaders = ctx.badHeaders or {}
+    ctx.badHeaders[st.header.n] = true
+    rejected[#rejected + 1] = e.imgPath
+    local st2, e2 = st.next()
+    if not st2 then                               -- 次の候補も合わない: 保存名が違ったことを返す
+      return false, (e2 and e2.stage == "OCR") and e2 or e
+    end
     st = st2
   end
+  -- 別のトークの画面の撮影は、目的のトークを書き出せたら残さない
+  for _, img in ipairs(rejected) do os.remove(img) end
   if dst == "dry" then return true, "（確認だけ。保存はしていない）" end
   note(ctx, "保存", "保存して Linetxt に置いた（" .. (dst:match("[^/]+$") or dst) .. "）")
   return true, dst
