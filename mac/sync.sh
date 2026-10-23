@@ -41,6 +41,13 @@ fi
 cd "$REPO" || exit 1
 mkdir -p "$(dirname "$LOG")"
 
+# 前の回の積み直しがぶつかって途中で止まっていたら取り消す（そのままだと main に
+# 戻れず、取り込みも自動更新もずっと止まる）
+in_rebase() { [ -d "$(git rev-parse --git-dir)/rebase-merge" ] || [ -d "$(git rev-parse --git-dir)/rebase-apply" ]; }
+if in_rebase; then
+  git rebase --abort >>"$LOG" 2>&1 && log "warn: 途中で止まっていた積み直しを取り消した"
+fi
+
 # main 以外のブランチでは取り込みも push もしない（push origin main は
 # 手元の main を送るだけなので、別ブランチの commit は届かないのに
 # 「push 完了」と出てしまう）
@@ -51,7 +58,23 @@ if [ "$BRANCH" != "main" ]; then
 fi
 
 # 他の端末やクラウド側の更新を先に取り込む（ローカル変更は保持）
-git pull --rebase --autostash origin main >>"$LOG" 2>&1 || log "warn: pull に失敗（続行）"
+if ! git pull --rebase --autostash origin main >>"$LOG" 2>&1; then
+  if in_rebase; then
+    # 手元の commit が GitHub の版とぶつかった。積み直しを取り消し、commit も push も
+    # しない（途中の状態で commit すると main に戻れなくなる）
+    git rebase --abort >>"$LOG" 2>&1
+    log "error: 手元の commit が GitHub の版とぶつかったので取り込みをやめた（commit も push もしない）"
+    exit 1
+  fi
+  log "warn: pull に失敗（続行）"
+fi
+# 手元の変更を戻す所でぶつかった印（<<<<<<<）が残っていたら、公開リポジトリに送らない
+CONFLICTS="$(git diff --name-only --diff-filter=U)"
+if [ -n "$CONFLICTS" ]; then
+  log "error: 手元の変更と GitHub の版がぶつかった（commit も push もしない）"
+  printf '%s\n' "$CONFLICTS" | while IFS= read -r f; do log "  $f"; done
+  exit 1
+fi
 
 # 生 txt を集める。ファイル名に空白が入るので -print0 で受ける
 FILES=()
