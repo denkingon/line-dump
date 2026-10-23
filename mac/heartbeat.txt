@@ -1,19 +1,5 @@
-last_run: 2026-10-23 18:28:08
-version: v4.1-7a37782a
+last_run: 2026-10-23 23:46:17
+version: v4.1-db9df449
 ok: 0
-ng: 13
-failures:
-  - オーチュー/小林央忠: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-182519_オーチュー_小林央忠_トーク選択.jpg）
-  - 3日後 ハートランド: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-182528_3日後 ハートランド_トーク選択.jpg）
-  - かにっこにー: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-182538_かにっこにー_トーク選択.jpg）
-  - 山脇開生: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182551_山脇開生_トーク確認.jpg）
-  - Berry: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182605_Berry_トーク確認.jpg）
-  - パプリカ: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182632_パプリカ_トーク確認.jpg）
-  - p Koyo: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-182642_p Koyo_トーク選択.jpg）
-  - H Village: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182703_H Village_トーク確認.jpg）
-  - np 雄太: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182717_np 雄太_トーク確認.jpg）
-  - il 石川ありがとう: [トーク選択] 一覧にも検索結果にも名前が見えない（画像: Dropbox の Backups/line-dump-debug/20261023-182727_il 石川ありがとう_トーク選択.jpg）
-  - いりべひでなり: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182741_いりべひでなり_トーク確認.jpg）
-  - 村田研: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182754_村田研_トーク確認.jpg）
-  - mP-廣瀬舞: [トーク確認] 開いたトークが違う（またはヘッダの名前が読めない）（画像: Dropbox の Backups/line-dump-debug/20261023-182807_mP-廣瀬舞_トーク確認.jpg）
-debug: Dropbox の Backups/line-dump-debug（撮影画像と診断。非公開）
+ng: 0
+note: 中断: 人の操作を検知（今のトーク名を集めている時に中断）
