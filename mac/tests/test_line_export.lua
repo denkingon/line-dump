@@ -27,7 +27,7 @@ local function readfile(p) local f = io.open(p, "rb"); if not f then return nil 
 local function writefile(p, s) local f = assert(io.open(p, "wb")); f:write(s); f:close() end
 -- 更新日時を ago 秒前にする（POSIX の touch -t なので macOS でも動く）
 local function age(p, ago) run("touch -t " .. os.date("%Y%m%d%H%M.%S", os.time() - ago) .. " " .. sh(p)) end
-local function debugFile(img) return img and (img:gsub("^~", HOME)) end
+local DEBUG = ROOT .. "/line-dump-debug"          -- 撮影画像と診断の置き場（本物は Dropbox）
 
 -- ===================== 偽の世界 =====================
 local W
@@ -38,7 +38,7 @@ local T = 1000000                     -- 偽の時計（usleep で進む）
 
 local function reset(opts)
   run("rm -rf " .. sh(ROOT .. "/home") .. " " .. sh(ROOT .. "/repo") .. " " ..
-      sh(ROOT .. "/out") .. " " .. sh(ROOT .. "/tmp"))
+      sh(ROOT .. "/out") .. " " .. sh(ROOT .. "/tmp") .. " " .. sh(DEBUG))
   for _, d in ipairs({ HOME .. "/Downloads", HOME .. "/Desktop", HOME .. "/Documents",
                        REPO .. "/mac", OUT, ENV.TMPDIR }) do
     run("mkdir -p " .. sh(d))
@@ -51,7 +51,7 @@ local function reset(opts)
     focus = "input",                 -- 前のトークのメッセージ入力欄にフォーカスがある
     clipboard = "ORIGINAL", knobs = {}, axCalls = 0, clickN = 0,
     clicks = {}, keys = {}, cmds = {}, caps = {}, alerts = {}, logs = {},
-    opens = 0, synced = 0, escape = false, called = false, menuClicked = {},
+    opens = 0, synced = 0, escape = false, called = false, menuClicked = {}, openLog = {}, after = {},
     mouse = { x = 5, y = 5 }, lastHID = T - 999,
   }
   for k, v in pairs(opts or {}) do W[k] = v end
@@ -62,10 +62,12 @@ local function chat(name) for _, c in ipairs(W.chats) do if c.name == name then 
 local function layout()
   local f = W.win
   local field = { x = f.x + 80, y = f.y + 50, w = 260, h = 28 }
-  local hy = f.y + 66
   local k = W.knobs
+  local hy = f.y + 66 + (k.headerDY or 0)
+  -- 実機では検索欄の AX の枠が見た目（一覧の幅）より狭い
+  local fieldAX = k.narrowField and { x = field.x, y = field.y, w = k.narrowField == true and 150 or k.narrowField, h = field.h } or field
   return {
-    field = field,
+    field = field, fieldAX = fieldAX,
     rowY = function(i) return field.y + field.h + 40 + (i - 1) * 64 end,
     rowX = field.x + 130,
     header = { x = f.x + 430, y = hy },
@@ -76,10 +78,13 @@ local function layout()
   }
 end
 
+-- 一覧に出ている行。hidden のトークは普段の一覧には無く、検索した時だけ出る
 local function results()
   local r = {}
   for _, c in ipairs(W.chats) do
-    if W.search == "" or c.name:find(W.search, 1, true) then r[#r + 1] = c end
+    if (W.search == "" and not c.hidden) or (W.search ~= "" and c.name:find(W.search, 1, true)) then
+      r[#r + 1] = c
+    end
   end
   return r
 end
@@ -96,13 +101,26 @@ local function visibleTexts(screen)
   if not W.win.visible then return t end
   add(W.knobs.winTitle or "LINE", W.win.x + W.win.w / 2, W.win.y + 12)   -- 窓のタイトル
   add(W.search ~= "" and W.search or "検索", L.field.x + L.field.w / 2, L.field.y + L.field.h / 2)
+  -- 一覧の列の中・検索欄と同じ高さにある物（検索欄の AX の枠より右。実機ではアイコン等）
+  if W.knobs.listJunk then add(W.knobs.listJunk, L.field.x + 230, L.field.y + L.field.h / 2) end
+  -- 検索中は検索欄の下に絞り込みのタブが並ぶ
+  if W.knobs.searchTabs and W.search ~= "" then
+    for i, s in ipairs({ "すべて", "友だち", "グループ", "トーク", "メッセージ" }) do
+      add(s, L.field.x + (i - 1) * 55, L.field.y + L.field.h + 14)
+    end
+  end
   for i, c in ipairs(results()) do
     if not W.knobs.ocrDropRows then add(c.ocrRow or c.name, L.rowX, L.rowY(i)) end
     add(c.preview or "最後のメッセージ", L.rowX, L.rowY(i) + 18)
   end
   if W.open then
     local c = chat(W.open) or { name = W.open }
-    add(c.ocrHeader or c.name, L.header.x, L.header.y)
+    -- ヘッダは開いてから headerDelay 秒たって出る（読み込みが遅い時）
+    if not W.knobs.headerDelay or T - (W.openedAt or 0) >= W.knobs.headerDelay then
+      add(c.ocrHeader or c.name, L.header.x, L.header.y)
+    end
+    -- トーク欄の上端（ヘッダより上）にある別の文字
+    if W.knobs.paneTop then add(W.knobs.paneTop, W.win.x + 600, W.win.y + 30) end
     for _, m in ipairs(c.messages or {}) do add(m.s, W.win.x + m.dx, W.win.y + m.dy) end
   end
   -- ⋮ のメニューは別窓として出る（LINE の窓だけを撮ると写らない）
@@ -151,6 +169,12 @@ local function doSave(p)
   W.saved = p; W.sheet = nil; W.focus = nil
 end
 
+-- 行を押した時に開くトーク（wrongChatOnce は最初の1回だけ別のトークが開く）
+local function opened(c)
+  if W.knobs.wrongChatOnce and not W.wrongDone then W.wrongDone = true; return W.knobs.wrongChatOnce end
+  return W.knobs.wrongChatOnClick or c.name
+end
+
 -- 押した所に重なっている物（通知バナーなど）
 local function overlayAt(pt)
   for _, o in ipairs(W.overlays or {}) do
@@ -197,7 +221,8 @@ local function click(pt)
   end
   for i, c in ipairs(results()) do
     if math.abs(pt.y - L.rowY(i)) < 28 and pt.x > L.field.x - 60 and pt.x < L.field.x + L.field.w + 10 then
-      W.open = W.knobs.wrongChatOnClick or c.name
+      W.open = opened(c); W.openedAt = T
+      W.openLog[#W.openLog + 1] = c.name
       W.focus = "input"
       return
     end
@@ -281,7 +306,7 @@ local function fieldEl(L)
   return el(frameAttrs({ AXRole = "AXTextField",
     AXValue = function() return W.search end,
     AXFocused = function() if W.knobs.focusUnknown then return nil end; return W.focus == "search" end,
-  }, L.field), { set = function(k, v)
+  }, L.fieldAX), { set = function(k, v)
     if k == "AXFocused" and not W.knobs.focusIgnored then W.focus = "search" end
     if k == "AXValue" then W.search = v; W.searchSetByAX = true end
   end })
@@ -297,10 +322,19 @@ local function winEl()
     AXChildren = function()
       -- メッセージ入力欄（窓の下の方の AXTextField）を検索欄より先に置き、
       -- 「上の方の AXTextField＝検索欄」の絞り込みが効くかを試す
-      local pane = el({ AXRole = "AXGroup", AXChildren = {
+      local paneKids = {
         el(frameAttrs({ AXRole = "AXTextField", AXValue = "" }, L.input),
            { set = function(k) if k == "AXFocused" then W.focus = "input" end end }),
-      } })
+      }
+      -- トーク欄のメッセージも AX のセル（一覧の幅を割り出す時に数えないか）
+      if W.open then
+        for i = 1, 3 do
+          paneKids[#paneKids + 1] = el(frameAttrs({ AXRole = "AXCell", AXChildren = {
+            el({ AXRole = "AXStaticText", AXValue = "メッセージ" .. i }) } },
+            { x = W.win.x + 400, y = W.win.y + 150 + i * 60, w = W.win.w - 420, h = 50 }))
+        end
+      end
+      local pane = el({ AXRole = "AXGroup", AXChildren = paneKids })
       local cells = {}
       for i, c in ipairs(results()) do
         if c.noAX then goto skip end
@@ -309,11 +343,16 @@ local function winEl()
         } }, { x = L.field.x - 40, y = L.rowY(i) - 30, w = 330, h = 60 }),
           { AXPress = function()
               if W.knobs.axPressFails then return "fail" end
-              W.open = W.knobs.wrongChatOnClick or c.name; W.axPressed = c.name
+              W.open = opened(c); W.axPressed = c.name; W.openedAt = T
+              W.openLog[#W.openLog + 1] = c.name
             end })
         ::skip::
       end
       local left = { el({ AXRole = "AXList", AXChildren = cells }) }
+      if W.knobs.splitterX then
+        left[#left + 1] = el(frameAttrs({ AXRole = "AXSplitter" },
+          { x = W.win.x + W.knobs.splitterX, y = W.win.y, w = 1, h = W.win.h }))
+      end
       if not hideField then table.insert(left, 1, fieldEl(L)) end
       local kids = { pane, el({ AXRole = "AXGroup", AXChildren = left }) }
       if W.sheet then kids[#kids + 1] = sheetEl() end
@@ -340,14 +379,14 @@ local otherWin = { id = function() return 77 end }
 local appObj = {
   bundleID = function() return "jp.naver.line.mac" end,
   pid = function() return LINE_PID end,
-  isFrontmost = function() return not W.knobs.frontIsOther end,
+  isFrontmost = function() return not (W.knobs.frontIsOther or W.stolen) end,
   allWindows = function() return W.win.exists and { winObj } or {} end,
   focusedWindow = function()
     if W.focusedOther then return otherWin end
     return W.win.visible and winObj or nil
   end,
   mainWindow = function() return W.win.exists and winObj or nil end,
-  activate = function() end,
+  activate = function() if W.stolen then W.stolen = false; W.reactivated = (W.reactivated or 0) + 1 end end,
 }
 
 local function execute(cmd)
@@ -386,6 +425,9 @@ local function execute(cmd)
     return string.format("%d\n", math.floor((T - W.lastHID) * 1e9)), true
   end
   if cmd:match("sync%.sh") then W.synced = W.synced + 1; return "push 完了\n", true end
+  if cmd:match("symbolic%-ref") then return (W.knobs.branch or "main") .. "\n", true end
+  if cmd:match("pmset %-g") then return " displaysleep         " .. (W.knobs.displaySleep or 10) .. "\n", true end
+  if cmd:match("^/usr/bin/sips") then W.sips = (W.sips or 0) + 1; return "", true end   -- Linux には無い → PNG のまま
   return "", true
 end
 
@@ -415,11 +457,19 @@ hs = {
       if W.pendingUser == "mouse" then W.mouse = { x = W.mouse.x + 40, y = W.mouse.y }; W.pendingUser = nil end
     end,
     secondsSinceEpoch = function() return T end,
-    doEvery = function() return { stop = function() end } end,
-    doAfter = function() return { stop = function() end } end,
+    doEvery = function() return { stop = function() end, nextTrigger = function() return 42 end } end,
+    doAfter = function(_, fn) W.after[#W.after + 1] = fn; return { stop = function() end } end,
   },
   caffeinate = {
-    sessionProperties = function() return {} end,
+    sessionProperties = function() return { CGSSessionScreenIsLocked = W.knobs.locked or nil } end,
+    get = function(k) return W.displayIdle == true end,
+    set = function(k, v)
+      if k == "displayIdle" then
+        W.displayIdle = v; W.displayIdleSet = (W.displayIdleSet or 0) + 1
+        if v then W.displayIdleWasOn = true end
+      end
+    end,
+    declareUserActivity = function() W.declared = true end,
     currentAssertions = function() return W.knobs.assertions or {} end,
     watcher = { new = function() return { start = function() end, stop = function() end } end,
                 systemDidWake = 1, screensDidUnlock = 2, sessionDidBecomeActive = 3 },
@@ -459,6 +509,8 @@ hs = {
     readAllData = function() return { ["public.utf8-plain-text"] = W.clipboard } end,
     writeAllData = function(t)
       W.clipboard = t["public.utf8-plain-text"]
+      -- 貼り付けの直前に通知などで一瞬前面が外れる（前に出し直せば戻る）
+      if W.knobs.stealOnPaste and W.clipboard ~= "ORIGINAL" then W.stolen = true end
       if t["org.nspasteboard.TransientType"] then W.transientMarked = true end
       return true
     end,
@@ -466,6 +518,7 @@ hs = {
   },
   screen = { primaryScreen = function() return screenObj end },
   screenRecordingState = function() return not W.knobs.noPermission end,
+  openConsole = function() W.consoleOpened = true end,
   application = {
     find = function() return W.running and appObj or nil end,
     -- 本物は処理の途中では更新されない（コンソールから実行すると Hammerspoon のまま）
@@ -498,10 +551,12 @@ hs = {
       return el({ pid = LINE_PID })
     end,
     systemWideElement = function()
-      return el({ AXFocusedUIElement = function()
+      return el({ AXFocusedApplication = function()
+        return el({ AXTitle = (W.knobs.frontIsOther or W.stolen) and "Finder" or "LINE" })
+      end, AXFocusedUIElement = function()
         if W.knobs.focusUnknown then return nil end
         local L = layout()
-        if W.focus == "search" then return el(frameAttrs({}, L.field)) end
+        if W.focus == "search" then return el(frameAttrs({}, L.fieldAX)) end
         if W.focus == "input" then return el(frameAttrs({}, L.input)) end
       end })
     end,
@@ -664,7 +719,7 @@ test("PNG の大きさ・OCR 出力の読み取り・日付スタンプ", functi
 end)
 
 -- ===================== 流れ全体 =====================
-test("正常: 検索→行→ヘッダ確認→⋮→トークを保存→保存→OUT_DIRへ移動", function()
+test("正常: 一覧に見えている行→ヘッダ確認→⋮→トークを保存→保存→OUT_DIRへ移動", function()
   reset({ chats = chats({ "直承Jikisho", "Berry" }) })
   local ok, dst = exportOne("Berry")
   check(ok, "成功する: " .. tostring(type(dst) == "table" and dst.msg or dst))
@@ -673,9 +728,19 @@ test("正常: 検索→行→ヘッダ確認→⋮→トークを保存→保存
   check(exists(want), "ファイルがある")
   check(not exists(HOME .. "/Downloads/[LINE]Berry_" .. TODAY .. ".txt"), "既定の保存先からは移した")
   check(W.win.w == SCREEN.w and W.win.h == SCREEN.h, "窓を画面いっぱいにした")
-  check(W.search == "Berry" and not W.searchSetByAX, "検索欄に名前を貼り付けた")
+  check(W.search == "", "一覧に見えていたので検索していない")
+  for i = 1, W.keysAtSheet or 0 do check(W.keys[i] ~= "cmd+v", "保存ダイアログの前に何も貼っていない") end
   check(W.menuClicked[1] == "トークを保存", "「トークを保存」を押した")
   check(W.transientMarked, "一時的なクリップボードには履歴に残らない印を付けた")
+  check(W.displayIdleWasOn and W.displayIdle == false, "実行中だけ画面を消さないようにし、終わったら戻した")
+  safe()
+end)
+
+test("一覧に無いトークは検索して開く（検索→行→ヘッダ確認）", function()
+  reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true } }, knobs = { searchTabs = true } })
+  local ok, dst = exportOne("Berry")
+  check(ok and dst == OUT .. "/[LINE]Berry_" .. TODAY .. ".txt", "成功する: " .. tostring(type(dst) == "table" and dst.msg or dst))
+  check(W.search == "Berry" and not W.searchSetByAX, "検索欄に名前を貼り付けた")
   safe()
 end)
 
@@ -762,10 +827,16 @@ test("別のトークが開いたらヘッダ確認で止める", function()
   reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { wrongChatOnClick = "直承Jikisho" } })
   local ok, e = exportOne("Berry")
   check(not ok and e.stage == "トーク確認", "トーク確認で失敗: " .. tostring(e and e.stage))
-  check(e.detail and e.detail:find("直承Jikisho", 1, true), "ヘッダに見えた名前はログ用の detail に: " .. tostring(e.detail))
+  check(e.detail and e.detail:find("ヘッダ行", 1, true) and e.detail:find("■", 1, true)
+        and not e.detail:find("Jikisho", 1, true), "ヘッダに見えた名前は伏せ字で detail に: " .. tostring(e.detail))
   check(not e.msg:find("直承Jikisho", 1, true), "公開される msg には画面の文字を入れない")
-  check(e.img and e.img:find("^~/Library/Logs/line%-dump/debug/") and exists(debugFile(e.img)),
-    "撮影画像をリポジトリの外に残す: " .. tostring(e.img))
+  check(e.imgPath and e.imgPath:sub(1, #DEBUG) == DEBUG and exists(e.imgPath),
+    "撮影画像をリポジトリの外（Dropbox の line-dump-debug）に残す: " .. tostring(e.imgPath))
+  check(e.img and e.img:find("^Dropbox の ") and not e.img:find(HOME, 1, true), "heartbeat に書く形はユーザー名を含まない: " .. tostring(e.img))
+  check(e.layout and #e.layout > 0, "失敗した時の画面の並び（伏せ字）を付ける")
+  for _, l in ipairs(e.layout or {}) do
+    check(not l:find("Jikisho", 1, true) and not l:find("最後のメッセージ", 1, true), "並びも伏せ字: " .. l)
+  end
   check(#W.menuClicked == 0 and not W.menuOpen and not W.sheet, "メニューも保存も触っていない")
   safe()
 end)
@@ -864,7 +935,8 @@ test("保存名がトーク名と合わなければキャンセルして止め�
   local ok, e = exportOne("Berry")
   check(not ok and e.stage == "保存ダイアログ", "保存ダイアログで失敗: " .. tostring(e and e.stage))
   check(W.cancelled and not W.sheet and not W.saved, "キャンセルを押し、保存していない")
-  check(not e.msg:find("Jikisho", 1, true) and e.detail:find("Jikisho", 1, true), "別トーク名は detail だけ")
+  check(not e.msg:find("Jikisho", 1, true) and not e.detail:find("Jikisho", 1, true)
+        and e.detail:find("[LINE]■9字.txt", 1, true), "別トーク名は伏せ字（字数だけ）: " .. tostring(e.detail))
   safe()
 end)
 
@@ -1038,14 +1110,14 @@ test("検索欄が最後まで読めなければ「窓」で止める", function
 end)
 
 test("AX でフォーカスが入らなければ検索欄を押してから打つ", function()
-  reset({ chats = chats({ "Berry" }), knobs = { focusIgnored = true } })
+  reset({ chats = { { name = "Berry", hidden = true } }, knobs = { focusIgnored = true } })
   local ok = exportOne("Berry")
   check(ok and W.search == "Berry", "検索欄を押してフォーカスを入れた")
   safe()
 end)
 
 test("検索欄にフォーカスが入らなければ、何も打たずに止める", function()
-  reset({ chats = chats({ "Berry" }), knobs = { focusIgnored = true, clickNoFocus = true } })
+  reset({ chats = { { name = "Berry", hidden = true } }, knobs = { focusIgnored = true, clickNoFocus = true } })
   local ok, e = exportOne("Berry")
   check(not ok and e.stage == "検索欄", "検索欄で失敗: " .. tostring(e and e.stage))
   for _, k in ipairs(W.keys) do check(k ~= "cmd+a" and k ~= "cmd+v", "キーを送っていない: " .. k) end
@@ -1053,7 +1125,7 @@ test("検索欄にフォーカスが入らなければ、何も打たずに止�
 end)
 
 test("貼り付けが検索欄に入らなければ AX で値を入れる（キーは打ち直さない）", function()
-  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { searchIgnoresPaste = true } })
+  reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true } }, knobs = { searchIgnoresPaste = true } })
   local ok = exportOne("Berry")
   check(ok and W.search == "Berry" and W.searchSetByAX, "AX で入れて成功")
   for _, k in ipairs(W.keys) do check(not k:find("^type:"), "キー入力で打ち直していない: " .. k) end
@@ -1087,7 +1159,7 @@ test("検索結果に無ければトーク選択で止める", function()
   reset({ chats = chats({ "直承Jikisho" }) })
   local ok, e = exportOne("Berry")
   check(not ok and e.stage == "トーク選択", "トーク選択で失敗: " .. tostring(e and e.stage))
-  check(e.img and exists(debugFile(e.img)), "撮影画像を残す")
+  check(e.imgPath and exists(e.imgPath), "撮影画像を残す")
   safe()
 end)
 
@@ -1120,7 +1192,7 @@ test("完全一致の行から開いたのに保存名が前方一致なら止�
   local ok, e = exportOne("かにっこにー")
   check(not ok and e.stage == "保存ダイアログ", "保存ダイアログで失敗: " .. tostring(e and e.stage))
   check(W.cancelled and not W.saved, "キャンセルして保存していない")
-  check(e.img and exists(debugFile(e.img)), "閉じる前の画面を残した")
+  check(e.imgPath and exists(e.imgPath), "閉じる前の画面を残した")
   safe()
 end)
 
@@ -1157,7 +1229,7 @@ test("LINE が前面に来なければ、何も打ち込まずに止める", fun
 end)
 
 test("途中で他のアプリが前に出たら、そのアプリには打ち込まない（検索の後）", function()
-  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { frontLostAfterPaste = true } })
+  reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true } }, knobs = { frontLostAfterPaste = true } })
   local ok, e = exportOne("Berry")
   check(not ok and e.stage == "クリック", "クリックで失敗: " .. tostring(e and e.stage))
   check(not W.typedElsewhere and not W.clickedElsewhere, "他のアプリを操作していない")
@@ -1276,7 +1348,8 @@ test("LINE の別のダイアログ（設定など）は保存ダイアログと
 end)
 
 test("フォーカスが分からない時はキーを送らず、AX で検索欄に入れる", function()
-  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { focusUnknown = true, focusIgnored = true, clickNoFocus = true } })
+  reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", hidden = true } },
+          knobs = { focusUnknown = true, focusIgnored = true, clickNoFocus = true } })
   local ok = exportOne("Berry")
   check(ok and W.searchSetByAX, "AX で入れて成功")
   for i = 1, W.keysAtSheet or #W.keys do
@@ -1299,15 +1372,11 @@ test("中断した日のやり直しは、済んだトークを飛ばして残�
     check(hb1:find("中断", 1, true), "1回目は中断: \n" .. hb1)
     W.knobs.userActsAtClick = nil; W.clickN = 0; W.lastHID = T - 999
     W.search = ""; W.saved = nil
-    local searched = {}
-    local orig = hs.eventtap.keyStroke
-    hs.eventtap.keyStroke = function(mods, k)
-      if k == "v" and W.focus == "search" then searched[#searched + 1] = W.clipboard end
-      return orig(mods, k)
-    end
+    check(W.openLog[1] == first, "1回目は " .. first .. " から開いた")
+    W.openLog = {}
     M._t.maybeRun()
-    hs.eventtap.keyStroke = orig
-    for _, n in ipairs(searched) do check(n ~= first, "済んだ " .. first .. " は検索し直していない") end
+    check(#W.openLog > 0, "2回目も開いた")
+    for _, n in ipairs(W.openLog) do check(n ~= first, "済んだ " .. first .. " は開き直していない") end
     local hb2 = heartbeat()
     check(line(hb2, "ok: " .. #M._t.targets), "合わせて全件 OK: \n" .. hb2)
   end)
@@ -1342,10 +1411,11 @@ test("runExport: 全件を回し、heartbeat に段と画像を書いて push �
   M._t.runExport()
   local hb = heartbeat()
   local n = #M._t.targets
-  check(line(hb, "version: v4 (OCR)"), "heartbeat に v4")
+  check(hb:find("\nversion: v4%.1%-%x+\n"), "heartbeat に版（v4.1-中身から作る印）")
   check(line(hb, "ok: " .. (n - 1)) and line(hb, "ng: 1"), "ok/ng の数: \n" .. hb)
   check(hb:find("村田研: [トーク選択]", 1, true), "失敗した段を書く")
-  check(hb:find("~/Library/Logs/line-dump/debug/", 1, true), "画像のパスを書く（~ 始まり）")
+  check(hb:find("（画像: Dropbox の ", 1, true) and hb:find("\ndebug: Dropbox の ", 1, true), "画像の置き場を書く（Dropbox）")
+  check(exists(DEBUG .. "/latest.txt"), "診断ファイルを Dropbox に書いた")
   check(not hb:find(HOME, 1, true), "heartbeat にユーザー名入りのパスを書かない")
   check(W.synced == 1, "sync.sh を1回呼んだ")
   local files = run("ls " .. sh(OUT))
@@ -1359,8 +1429,12 @@ test("runExport: heartbeat には画面の文字や他のトーク名を書か�
   M._t.runExport()
   local hb = heartbeat()
   check(not hb:find("Jikisho", 1, true), "heartbeat に別トーク名が無い:\n" .. hb)
+  check(hb:find("[トーク確認]", 1, true) and not hb:find("ヘッダ行", 1, true) and not hb:find("■", 1, true),
+    "画面由来の detail は伏せ字でも heartbeat に書かない:\n" .. hb)
   local logged = table.concat(W.logs, "\n")
-  check(logged:find("Jikisho", 1, true), "このMacのログには残す")
+  check(not logged:find("Jikisho", 1, true), "コンソールのログにも別トーク名を出さない（伏せ字）")
+  local report = readfile(DEBUG .. "/latest.txt") or ""
+  check(report:find("[トーク確認]", 1, true) and not report:find("Jikisho", 1, true), "診断ファイルも伏せ字:\n" .. report)
 end)
 
 test("runExport: 画面収録が未許可なら操作せず、理由を heartbeat に書く", function()
@@ -1445,6 +1519,295 @@ test("maybeRun: ビデオ会議・画面共有・動画の最中は見送る", f
     M._t.maybeRun()
     check(W.synced == 1, "起こしておくだけの道具（Amphetamine）なら走る")
   end)
+end)
+
+-- ===================== 実機（2026-10-22）で見えた画面に合わせた所 =====================
+test("メンバー数の後ろのアイコンの字・3字までの余りは落として照合する", function()
+  reset()
+  local M = load()
+  local n, c, score = M._t.norm, M._t.countless, M._t.score
+  check(c(n("Berry（5）→ ビ")) == "berry", "（5）→ ビ を落とす: " .. c(n("Berry（5）→ ビ")))
+  check(c(n("家族(2)(5)")) == "家族(2)", "最後のメンバー数だけ落とす")
+  check(c(n("ABC(2023)同窓会のみんな")) == n("ABC(2023)同窓会のみんな"), "後ろが長ければ名前の一部とみなして残す")
+  check(score(n("Berry"), n("Berry（5）→ ビ")) == 3, "ヘッダの余りがあっても完全一致")
+  check(score(n("家族(2)"), n("家族(2)")) == 3, "名前そのものに (2) が入っていても完全一致")
+end)
+
+test("伏せ字: TARGETS の名前と LINE の決まった表示以外は字数だけ", function()
+  reset()
+  local M = load()
+  local m = M._t.masked
+  check(m("Berry") == "〈Berry〉", "対象の名前は出す: " .. m("Berry"))
+  check(m("パプリカ🌶️（82）") == "〈パプリカ〉", "絵文字・メンバー数付きでも: " .. m("パプリカ🌶️（82）"))
+  check(m("かにっこにー3") == "〈かにっこにー〉＋1字", "前方一致は後ろの字数だけ: " .. m("かにっこにー3"))
+  check(m("今日のごはんどうする？") == "■11字", "それ以外は字数だけ: " .. m("今日のごはんどうする？"))
+  check(m("Berryに会った話なんだけど長くなる") == "■19字", "長い本文に名前が入っていても出さない: " .. m("Berryに会った話なんだけど長くなる"))
+  check(m("トークを保存") == "トークを保存" and m("通知オフ") == "通知オフ", "メニュー項目は出す")
+  check(m("12:34") == "［数字］", "時刻は［数字］")
+  check(M._t.maskedSave("[LINE]直承Jikisho.txt") == "[LINE]■9字.txt", "保存名も字数だけ")
+  check(M._t.maskedSave("[LINE]Berry.txt") == "[LINE]〈Berry〉", "対象の保存名は出す")
+  check(M._t.maskedSave(HOME .. "/Downloads/[LINE]秘密.txt") == "~/Downloads/[LINE]■2字.txt", "パスはホームを ~ に")
+end)
+
+test("実機の画面: 検索欄の AX の枠が狭く、ヘッダのメンバー数の後ろにアイコンの字が付く", function()
+  -- 10/22 の実機で「トーク確認」が3回続けて失敗した形
+  reset({ chats = { { name = "直承Jikisho" }, { name = "Berry", ocrHeader = "Berry（5）→ ビ" } },
+          knobs = { narrowField = true, listJunk = "編集" } })
+  local ok, dst = exportOne("Berry")
+  check(ok and dst == OUT .. "/[LINE]Berry_" .. TODAY .. ".txt", "成功する: " .. tostring(type(dst) == "table" and (dst.stage .. dst.msg .. tostring(dst.detail)) or dst))
+  safe()
+end)
+
+test("一覧の境目は一覧の AX のセルから割り出す（トーク欄のメッセージのセルは数えない）", function()
+  reset({ chats = chats({ "Berry" }), knobs = { narrowField = true } })
+  local M = load()
+  local trace = {}
+  local app = assert(M._t.prepareApp())
+  M._t.beginRun(app)
+  W.open = "Berry"                                -- トーク欄にメッセージのセルがある状態
+  local ok = M._t.exportOne(app, "Berry", { trace = trace })
+  M._t.endRun()
+  check(ok, "成功する")
+  local seen
+  for _, t in ipairs(trace) do if t.stage == "一覧" then seen = t.text end end
+  check(seen and seen:find("一覧のセル 1 個の右端", 1, true) and seen:find("境目 x=370", 1, true),
+    "セルの右端（最大化した窓 x=0 + 80 - 40 + 330 = 370）: " .. tostring(seen))
+end)
+
+test("セルが読めなければ仕切り（AXSplitter）で境目を決める", function()
+  reset({ chats = { { name = "直承Jikisho", noAX = true }, { name = "Berry", noAX = true, ocrHeader = "Berry（5）→ ビ" } },
+          knobs = { narrowField = true, listJunk = "編集", splitterX = 372 } })
+  local ok, e = exportOne("Berry")
+  check(ok, "成功する: " .. tostring(type(e) == "table" and e.msg or e))
+  safe()
+end)
+
+test("境目が仕切りで分かれば、検索欄に打った名前をヘッダと取り違えない", function()
+  -- 検索欄の AX の枠がとても狭く（100pt）、打った「Berry」が枠の右の先に見える。
+  -- セルは読めず、仕切りだけある。別のトークが開いたら「トーク確認」で止まる
+  reset({ chats = { { name = "直承Jikisho", noAX = true }, { name = "Berry", noAX = true, hidden = true } },
+          knobs = { narrowField = 100, splitterX = 372, wrongChatOnClick = "直承Jikisho" } })
+  local ok, e = exportOne("Berry")
+  check(not ok and e.stage == "トーク確認", "トーク確認で止める: " .. tostring(e and e.stage))
+  check(#W.menuClicked == 0, "メニューを押していない")
+  safe()
+end)
+
+test("ヘッダより上にトーク欄の別の文字があっても、検索欄と同じ高さの行で確かめる", function()
+  reset({ chats = chats({ "Berry" }), knobs = { paneTop = "ノート" } })
+  local ok, e = exportOne("Berry")
+  check(ok, "成功する: " .. tostring(type(e) == "table" and e.msg or e))
+  safe()
+end)
+
+test("ヘッダの表示が遅れても、4秒までは読み直して確かめる", function()
+  reset({ chats = chats({ "Berry" }), knobs = { headerDelay = 3 } })
+  local ok, e = exportOne("Berry")
+  check(ok, "成功する: " .. tostring(type(e) == "table" and e.msg or e))
+  safe()
+end)
+
+test("ヘッダが検索欄と同じ高さに無い画面でも、帯の一番上の行で確かめる", function()
+  reset({ chats = chats({ "Berry" }), knobs = { headerDY = 40 } })
+  local ok, e = exportOne("Berry")
+  check(ok, "成功する: " .. tostring(type(e) == "table" and e.msg or e))
+  safe()
+end)
+
+test("一覧の行で別のトークが開いたら、検索して開き直す", function()
+  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { wrongChatOnce = "直承Jikisho" } })
+  local ok, e = exportOne("Berry")
+  check(ok, "検索して開き直して成功: " .. tostring(type(e) == "table" and e.msg or e))
+  check(W.search == "Berry", "検索した")
+  check(W.saved and W.saved:find("[LINE]Berry_", 1, true), "Berry を保存した: " .. tostring(W.saved))
+  safe()
+end)
+
+test("貼り付けの直前に一瞬前面が外れても、LINE を前に出し直して続ける", function()
+  reset({ chats = { { name = "Berry", hidden = true } }, knobs = { stealOnPaste = true } })
+  local ok, e = exportOne("Berry")
+  check(ok, "成功する: " .. tostring(type(e) == "table" and e.msg or e))
+  check((W.reactivated or 0) >= 1, "前に出し直した")
+  check(not W.typedElsewhere, "他のアプリには打っていない")
+  check(table.concat(W.logs, "\n"):find("前面: Finder", 1, true), "その時の前面のアプリをログに残す")
+  safe()
+end)
+
+test("人の操作で止めた時は、理由の数字をログに残す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { userActsAtClick = 1 } })
+  pcall(exportOne, "Berry")
+  check(table.concat(W.logs, "\n"):find("見張り: 最後の自動操作から", 1, true), "無操作時間の数字をログに")
+end)
+
+-- ===================== 使う人向けのコマンド =====================
+test("diag: 何も押さず、伏せ字で出し、コンソールを前に出す（会話の中身を出さない）", function()
+  reset({ chats = { { name = "直承Jikisho", preview = "ひみつの話をしよう" },
+                    { name = "Berry", preview = "明日の待ち合わせ場所" } } })
+  W.open = "直承Jikisho"
+  chat("直承Jikisho").messages = { { s = "誰にも言わないでね", dx = 500, dy = 200 } }
+  local M = load()
+  W.logs = {}
+  M.diag()
+  local out = table.concat(W.logs, "\n")
+  for _, secret in ipairs({ "ひみつ", "待ち合わせ", "誰にも", "Jikisho" }) do
+    check(not out:find(secret, 1, true), "コンソールに「" .. secret .. "」を出していない")
+  end
+  check(out:find("〈Berry〉", 1, true) and out:find("■", 1, true), "対象の名前と伏せ字:\n" .. out)
+  check(out:find("✓ Berry", 1, true), "TARGETS が一覧に見えるかを出す")
+  check(out:find("[ヘッダ行]", 1, true) and out:find("[一覧]", 1, true), "読めた文字の領域を出す")
+  check(out:find("一覧とトーク欄の境目", 1, true) and out:find("⋮ を押す位置", 1, true), "境目と ⋮ の位置を出す")
+  check(#W.clicks == 0 and #W.keys == 0, "何も押していない")
+  check(W.consoleOpened, "コンソールを前に出した")
+  local report = readfile(DEBUG .. "/latest.txt") or ""
+  check(report:find("〈Berry〉", 1, true) and not report:find("ひみつ", 1, true), "診断ファイルも伏せ字")
+end)
+
+test("check: 「トークを保存」が見えたら押さずに閉じ、段ごとに ✓ を出す（保存しない）", function()
+  reset({ chats = chats({ "直承Jikisho", "Berry" }) })
+  local M = load()
+  W.logs = {}
+  local ok = M.check("Berry")
+  local out = table.concat(W.logs, "\n")
+  check(ok, "OK を返す:\n" .. out)
+  check(#W.menuClicked == 0 and not W.menuOpen and not W.sheet and not W.saved, "メニューを押さずに閉じ、保存していない")
+  for _, st in ipairs({ "✓ 準備", "✓ 窓", "✓ 一覧", "✓ トーク選択", "✓ トーク確認", "✓ メニュー" }) do
+    check(out:find(st, 1, true), "段ごとの経過: " .. st)
+  end
+  check(not out:find("Jikisho", 1, true), "他のトーク名は出さない")
+  check(W.consoleOpened, "コンソールを前に出した")
+  check(W.synced == 0, "push しない")
+  check((readfile(DEBUG .. "/latest.txt") or ""):find("確認（保存はしない）", 1, true), "診断ファイルを書いた")
+  safe()
+end)
+
+test("check: 失敗したら ✗ と、見えたもの（伏せ字）・画像・次にすることを出す", function()
+  reset({ chats = chats({ "直承Jikisho", "Berry" }), knobs = { wrongChatOnClick = "直承Jikisho" } })
+  local M = load()
+  W.logs = {}
+  local ok = M.check("Berry")
+  local out = table.concat(W.logs, "\n")
+  check(not ok, "NG を返す")
+  check(out:find("✗ トーク確認", 1, true) and out:find("見えたもの: ヘッダ行", 1, true)
+        and out:find("画像: Dropbox の ", 1, true) and out:find("次にすること", 1, true), "失敗の中身:\n" .. out)
+  check(not out:find("Jikisho", 1, true), "他のトーク名は出さない")
+  safe()
+end)
+
+test("one: 1件書き出して push し、結果をコンソールに出す", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  W.logs = {}
+  local ok = M.one("Berry")
+  local out = table.concat(W.logs, "\n")
+  check(ok and W.saved and W.synced == 1, "書き出して push した")
+  check(out:find("=== OK: [LINE]Berry_" .. TODAY .. ".txt を書き出した", 1, true), "結果を出す:\n" .. out)
+  check(W.consoleOpened, "コンソールを前に出した")
+end)
+
+test("status: 自動実行が走らない理由が分かる", function()
+  reset({ chats = chats({ "Berry" }), knobs = { displaySleep = 2, locked = true, branch = "try-v4" } })
+  local M = load()
+  W.logs = {}
+  M.status()
+  local out = table.concat(W.logs, "\n")
+  check(out:find("✗ リポジトリのブランチ: try-v4", 1, true), "main 以外のブランチ:\n" .. out)
+  check(out:find("✗ 画面ロック: 中", 1, true), "ロック中")
+  check(out:find("✗ 画面が 2 分で消える設定", 1, true), "画面が先に消える設定")
+  check(out:find("今日の自動実行: まだ", 1, true), "今日の状態")
+  check(out:find("次の確認: 約 42 秒後", 1, true), "次の確認")
+  check(W.consoleOpened, "コンソールを前に出した")
+  reset({ chats = chats({ "Berry" }) })
+  M = load()
+  at9am(function() W.lastHID = T - 30; M._t.maybeRun() end)
+  W.logs = {}
+  M.status()
+  out = table.concat(W.logs, "\n")
+  check(out:find("最後の確認: %d+:%d+ 使用中（無操作 30 秒"), "最後の確認で見送った理由:\n" .. out)
+  check(out:find("✓ 画面が消えるまで: 10 分", 1, true), "画面が消えるまでの時間")
+  W.knobs.cameraInUse = true
+  W.logs = {}
+  M.status()
+  check(table.concat(W.logs, "\n"):find("✗ 見送りの理由: カメラ使用中", 1, true), "見送りの理由")
+end)
+
+test("help: 使い方を出す", function()
+  reset()
+  local M = load()
+  W.logs = {}
+  M.help()
+  local out = table.concat(W.logs, "\n")
+  check(out:find("__LINE_EXPORT.check", 1, true) and out:find("__LINE_EXPORT.status", 1, true), "コマンドの一覧")
+  check(W.consoleOpened, "コンソールを前に出した")
+end)
+
+test("読み込み時: 新しい版なら、何も押さない診断を1回だけ自動で撮る", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  check(readfile(REPO .. "/mac/.loaded_version"):find(M._t.VERSION, 1, true), "読み込んだ版を残す")
+  check(#W.after == 1, "診断を予約した")
+  W.after[1]()
+  check(exists(DEBUG .. "/latest.txt") and #W.clicks == 0, "診断を書いた（何も押していない）")
+  check(not W.consoleOpened, "自動の診断ではコンソールを開かない")
+  W.after = {}
+  load()
+  check(#W.after == 0, "同じ版をもう一度読み込んでも撮らない")
+end)
+
+test("maybeRun: 新しい版が入った日は、失敗していた分だけもう一度試す（版ごとに1回）", function()
+  reset()
+  local M = load()
+  local names = {}
+  for _, t in ipairs(M._t.targets) do names[#names + 1] = type(t) == "table" and t[1] or t end
+  -- 1件目は今回も一覧に無い（失敗が残る）。それでも同じ版では2度やらない
+  for i = 2, #names do W.chats[#W.chats + 1] = { name = names[i] } end
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  local res = { "day=" .. TODAY, "version=v4.1-00000000", "ng=2" }
+  for i = 3, #names do res[#res + 1] = "ok=" .. names[i] end
+  writefile(REPO .. "/mac/.last_result", table.concat(res, "\n") .. "\n")
+  M = load()                                       -- 新しい版を読み込んだ
+  at9am(function()
+    M._t.maybeRun()
+    check(#W.openLog == 1 and W.openLog[1] == names[2],
+      "失敗していた2件だけ試した（1件目は見つからず、2件目を開いた）: " .. table.concat(W.openLog, ","))
+    check(line(heartbeat(), "ok: " .. (#names - 1)) and line(heartbeat(), "ng: 1"), "合わせて1件だけ NG:\n" .. heartbeat())
+    local synced = W.synced
+    W.lastHID = T - 999
+    M._t.maybeRun()
+    check(W.synced == synced, "同じ版ではもうやらない")
+  end)
+end)
+
+test("maybeRun: 前の版（v4）が失敗した日も、heartbeat から読んでやり直す", function()
+  reset({ chats = chats({ "Berry" }) })
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  writefile(REPO .. "/mac/heartbeat.txt", "last_run: " .. os.date("%Y-%m-%d") .. " 07:12:03\nversion: v4 (OCR)\nok: 4\nng: 9\n")
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  check(W.synced == 1 and W.saved, "やり直した")
+end)
+
+test("maybeRun: 昼になってもロック中などで走れない日は、理由を1回だけ残す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { locked = true } })
+  local M = load()
+  local realdate = os.date
+  os.date = function(fmt, ...)
+    if fmt == "*t" then local t = realdate("*t", ...); t.hour = 13; return t end
+    return realdate(fmt, ...)
+  end
+  local ok, err = pcall(function() M._t.maybeRun(); M._t.maybeRun() end)
+  os.date = realdate
+  if not ok then error(err, 0) end
+  check(heartbeat():find("note: 見送り中: 画面がロック中", 1, true), "理由を書いた: " .. heartbeat())
+  check(W.synced == 1 and #W.clicks == 0, "1回だけ push し、何も押していない")
+end)
+
+test("自動実行では、暗くなった画面を起こしてから始める", function()
+  reset()
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  M._t.runExport(true)
+  check(W.declared, "画面を起こした")
+  check(W.displayIdle == false, "画面を消さない設定は元に戻した")
 end)
 
 run("rm -rf " .. sh(ROOT))
