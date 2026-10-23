@@ -86,6 +86,8 @@ local L = {
   -- LINE が AX で教える位置と画面に写る位置のずれは毎回測る（窓の出し方で
   -- 変わる）。この幅より大きいずれは測り違いとみなす
   SHIFT_MAX       = 80,
+  -- 今のトーク名を集める時に読む一覧のページ数の上限（1ページ＝一覧の高さ分）
+  NAME_PAGES      = 15,
 }
 -- ▲
 
@@ -142,6 +144,17 @@ local function sh(s)                              -- シェル用の引用
   return "'" .. q .. "'"
 end
 -- 時間で区切って待つ（AX が固まって1回の確認が長引いても上限を守る）
+-- 想定外のエラー文（Lua のファイルパス入り）からホームのパスを ~ にする
+local function tidy(s)
+  s = tostring(s)
+  local i, j = s:find(HOME, 1, true)
+  while i do
+    s = s:sub(1, i - 1) .. "~" .. s:sub(j + 1)
+    i, j = s:find(HOME, i + 1, true)
+  end
+  return s
+end
+
 local function waitFor(fn, timeout, step)
   step = step or 0.25
   local limit = now() + timeout
@@ -767,6 +780,22 @@ local function sameText(v, n)
   return have >= math.max(2, math.ceil(vl * 0.6))
 end
 
+-- 2つの名前（norm 済み）の近さ 0〜1。片方がもう片方を含めば 0.5 以上
+-- （短い方/長い方の割合で上がる）。含まなければ同じ字の割合
+local function nameSim(a, b)
+  local la, lb = utf8.len(a) or 0, utf8.len(b) or 0
+  if la == 0 or lb == 0 then return 0 end
+  if a == b then return 1 end
+  local lo, hi = math.min(la, lb), math.max(la, lb)
+  if lo >= 2 and (a:find(b, 1, true) or b:find(a, 1, true)) then return 0.5 + 0.5 * lo / hi end
+  local want, common = {}, 0
+  for _, c in utf8.codes(a) do want[c] = (want[c] or 0) + 1 end
+  for _, c in utf8.codes(b) do
+    if (want[c] or 0) > 0 then want[c] = want[c] - 1; common = common + 1 end
+  end
+  return common / hi
+end
+
 local function measureShift(win, field, ffAX, items)
   local cy = ffAX.y + ffAX.h / 2
   local v = norm(attr(field, "AXValue") or "")
@@ -837,7 +866,8 @@ local function rowsByAX(win, paneX, below, dy)
     end, 40)
     -- 窓の下に半分以上はみ出した行（スクロールで隠れた行）は見えていないとみなす
     if r and r.x + r.w / 2 < paneX and r.y > below and r.y + r.h / 2 < wf.y + wf.h - 2 then
-      rows[#rows + 1] = { el = cell, n = t and norm(attr(t, "AXValue")) or "",
+      local raw = t and tostring(attr(t, "AXValue")) or nil
+      rows[#rows + 1] = { el = cell, n = raw and norm(raw) or "", raw = raw,
                           x = r.x + r.w / 2, y = r.y + r.h / 2, f = r }
     end
   end
@@ -941,10 +971,14 @@ local function pickRows(ctx, win, items, ff, paneX)
   end
   for i, c in ipairs(cells) do
     if c.sc == top and not byKey["cell" .. i] then
-      -- AX のセルだけで見つかった: そのセルを押す。ヘッダ照合用にセルの中の一番上の OCR の文字
-      local o
+      -- AX のセルだけで見つかった: そのセルを押す。ヘッダ照合用にセルの中の名前の
+      -- OCR の文字（名前に一番合う物。無ければ右の列の時刻・未読数を除いた一番上の物）
+      local o, os_ = nil, -1
       for _, it in ipairs(items) do
-        if inside(it, c.f) and (not o or it.y < o.y) then o = it end
+        if inside(it, c.f) and it.x < paneX - 70 and (utf8.len(it.n) or 0) >= 2 then
+          local sc = score(ctx.tn, it.n)
+          if sc > os_ or (sc == os_ and it.y < o.y) then o, os_ = it, sc end
+        end
       end
       rowFor("cell" .. i, { x = c.x, y = c.y, el = c.el, ocrN = o and o.n, axN = c.n })
     end
@@ -1037,7 +1071,9 @@ end
 -- （前のトークのメッセージ入力欄に名前を貼ってしまわないように）。
 -- フォーカスが入らないと分かった時だけ false。
 -- ffAX は AX の枠（フォーカスの確認用）、ff は画面の位置（押す所）。
+-- 入れるのは ctx.key（今の名前が分かっていればそれで探す文字。無ければ TARGETS の名前）。
 local function typeName(ctx, field, ffAX, ff)
+  local text = ctx.key or ctx.name
   guard()
   pcall(function() field:setAttributeValue("AXFocused", true) end); wait(0.2)
   local focused = fieldFocused(field, ffAX)
@@ -1048,14 +1084,14 @@ local function typeName(ctx, field, ffAX, ff)
   if focused == false then return false end
   if focused then
     key({"cmd"}, "a"); wait(0.1)
-    pasteText(ctx.name, function() return norm(attr(field, "AXValue") or "") == ctx.tn end)
+    pasteText(text, function() return norm(attr(field, "AXValue") or "") == norm(text) end)
     wait(1.0)
   end
   local v = attr(field, "AXValue")
-  if not focused or (v ~= nil and norm(v) ~= ctx.tn) then
+  if not focused or (v ~= nil and norm(v) ~= norm(text)) then
     -- フォーカスが分からない・貼り付けが入らない時は AX で値だけ入れる
     -- （どこにフォーカスがあるか分からない所にキーは送らない）
-    pcall(function() field:setAttributeValue("AXValue", ctx.name) end); wait(1.0)
+    pcall(function() field:setAttributeValue("AXValue", text) end); wait(1.0)
   end
   return true
 end
@@ -1072,6 +1108,228 @@ local function readList(ctx, win, field, ffAX)
   end
   ctx.dy, ctx.ff = dy, shifted(ffAX, dy)
   return items, cap
+end
+
+-- ---------- 0. 今のトーク名を集める ----------
+-- TARGETS の名前は古いことがある（LINE でトーク名を変えている）。書き出しの前に
+-- 検索欄を空にしてトークの一覧を上から下まで読み、今のトーク名を集めてから、
+-- TARGETS の名前を一番近い今の名前に結び付ける（resolveTarget）。探す・ヘッダで
+-- 確かめる・保存名を確かめるのは、その今の名前で行う。
+-- 名前とみなすのは、一覧の各行の一番上の行（右に時刻がある高さ）だけ。その下の
+-- 行は最後のメッセージなので読まない。AX のセルに同じ文字があれば、その正確な
+-- 文字（OCR の読み違いが無い）を使う。集めた名前は DEBUG_DIR/names.txt
+-- （Dropbox。非公開）に書く。
+
+-- 一覧の画面（OCR）から各行の名前を拾う。一覧の右の列（時刻・未読数）を行の
+-- 目印にし、その高さの一番上の文字（2字以上）を名前とみなす。
+local function rowNames(items, ff, paneX)
+  local col, right = {}, {}
+  for _, it in ipairs(items) do
+    if it.y > ff.y + ff.h + 2 and it.x < paneX then
+      if it.x > paneX - 70 then right[#right + 1] = it
+      elseif it.x > ff.x + 20 and (utf8.len(it.n) or 0) >= 2 then col[#col + 1] = it end
+    end
+  end
+  table.sort(right, function(a, b) return a.y < b.y end)
+  local out, last = {}, nil
+  for _, a in ipairs(right) do
+    if not last or a.y - last >= 30 then          -- 時刻の下の未読数は同じ行
+      last = a.y
+      local best
+      for _, it in ipairs(col) do
+        if it.y >= a.y - 8 and it.y <= a.y + 22 and (not best or it.y < best.y) then best = it end
+      end
+      if best then out[#out + 1] = best end
+    end
+  end
+  return out
+end
+
+-- 一覧の上でホイールを回す（正は上へ、負は下へ）。押す時と同じく、LINE が前面で
+-- その位置に他の物が重なっていない時だけ
+local function scrollList(x, y, amount)
+  guard()
+  if not ensureFront() then blocked(FRONT_LOST) end
+  if not hitsLine(x, y) then blocked("押す所に LINE 以外の物が重なっている") end
+  hs.mouse.absolutePosition(hs.geometry.point(x, y))
+  hs.eventtap.scrollWheel({ 0, amount }, {}, "pixel")
+  synthesized(); wait(0.6)
+end
+
+-- 検索欄を空にして、普段のトークの一覧に戻す。フォーカスが入ったと確かめられない
+-- 時はキーを送らず、AX で値だけ消す（前のトークの入力欄の下書きを消さない）
+local function clearSearch(field, ffAX, ff)
+  if norm(attr(field, "AXValue") or "") == "" then return true end
+  guard()
+  pcall(function() field:setAttributeValue("AXFocused", true) end); wait(0.2)
+  local focused = fieldFocused(field, ffAX)
+  if focused ~= true then
+    clickAt(ff.x + ff.w / 2, ff.y + ff.h / 2); wait(0.3)
+    focused = fieldFocused(field, ffAX)
+  end
+  if focused == true then
+    key({"cmd"}, "a"); wait(0.1); key({}, "delete"); wait(0.8)
+  end
+  if norm(attr(field, "AXValue") or "") ~= "" then
+    pcall(function() field:setAttributeValue("AXValue", "") end); wait(0.8)
+  end
+  return norm(attr(field, "AXValue") or "") == ""
+end
+
+-- 今のトーク名を集める。戻り値: { {raw=表示の文字, n=norm, exact=AX の正確な文字か} … } / nil, 理由
+local function harvestNames(win)
+  local field, ffAX = searchField(win)
+  if not ffAX then return nil, "検索欄が見つからない" end
+  local paneX = listRight(win, ffAX)
+  local ctx = {}
+  local items = readList(ctx, win, field, ffAX)
+  if not items then return nil, "OCR が動かない" end
+  if not clearSearch(field, ffAX, ctx.ff) then return nil, "検索欄を空にできない" end
+  local f = win:frame()
+  local top = ctx.ff.y + ctx.ff.h
+  local mx, my = (ctx.ff.x + paneX) / 2, (top + f.y + f.h) / 2
+  local page = math.max(100, f.y + f.h - top - 90)      -- 1行ぶん重ねて送る
+  scrollList(mx, my, 20000)                              -- 一番上から読む
+  local list, seen = {}, {}
+  for _ = 1, L.NAME_PAGES do
+    items = readList(ctx, win, field, ffAX)
+    if not items then break end
+    local cells = rowsByAX(win, paneX, ctx.ff.y + ctx.ff.h, ctx.dy)
+    local added = 0
+    for _, it in ipairs(rowNames(items, ctx.ff, paneX)) do
+      local raw, exact = it.text, false
+      for _, c in ipairs(cells) do
+        if c.raw and inside(it, c.f) and sameText(c.n, it.n) then raw, exact = c.raw, true end
+      end
+      local n = norm(raw)
+      if n ~= "" and not seen[n] then
+        seen[n] = true; added = added + 1
+        list[#list + 1] = { raw = raw, n = n, exact = exact }
+      end
+    end
+    if added == 0 then break end                         -- 一番下まで読んだ
+    scrollList(mx, my, -page)
+  end
+  scrollList(mx, my, 20000)                              -- 一番上に戻しておく
+  return list
+end
+
+-- TARGETS の名前に一番近い今の名前。完全一致（絵文字・空白・メンバー数を除いて）
+-- ならそれ。無ければ近さ 0.85 以上（OCR が絵文字を1字に読んだ程度）で、2番目より
+-- 0.15 以上近い時だけ。それより離れた名前（「村田研」と「村田研OB会」）は、名前を
+-- 変えたのか別のトークなのかを名前だけでは決められないので結び付けない（別の
+-- トークを書き出さない）。その時は TARGETS の名前のまま探し、names.txt に一番
+-- 近い名前を書く（それを見て TARGETS を今の名前に直す）。
+-- 戻り値: 今の名前（list の1件）か nil, 近さ, 一番近かったもの
+local function resolveTarget(name, list)
+  local tn = norm(name)
+  local best, bs, second = nil, 0, 0
+  for _, e in ipairs(list or {}) do
+    local en = countless(e.n)
+    local sc = (en == tn or e.n == tn) and 1 or nameSim(tn, en)
+    if sc > bs then second = bs; best, bs = e, sc
+    elseif sc > second then second = sc end
+  end
+  if bs == 1 then return best, 1 end
+  if bs >= 0.85 and bs - second >= 0.15 then return best, bs end
+  return nil, bs, best
+end
+
+-- 2つの文字列に共通する一番長い部分（検索欄に入れる文字。OCR が名前の絵文字を
+-- 別の字に読んでいても、TARGETS の名前と共通の部分で探せば見つかる）
+local function commonPart(a, b)
+  local ok, r = pcall(function()
+    local A, B = {}, {}
+    for _, c in utf8.codes(a) do A[#A + 1] = c end
+    for _, c in utf8.codes(b) do B[#B + 1] = c end
+    local best, at, prev = 0, 0, {}
+    for i = 1, #A do
+      local cur = {}
+      for j = 1, #B do
+        if A[i] == B[j] then
+          cur[j] = (prev[j - 1] or 0) + 1
+          if cur[j] > best then best, at = cur[j], i end
+        end
+      end
+      prev = cur
+    end
+    if best == 0 then return "" end
+    return utf8.char(table.unpack(A, at - best + 1, at))
+  end)
+  return ok and r or ""
+end
+
+-- 1件ぶんの「今の名前」: 探す文字（key）・照合する名前（tn）を決める
+local function realFor(name, list)
+  local e, sc, near = resolveTarget(name, list)
+  if not e then return { found = false, sim = sc, near = near } end
+  local r = { found = true, raw = e.raw, n = e.n, exact = e.exact, sim = sc }
+  if countless(e.n) == norm(name) then r.same = true; return r end
+  if e.exact then r.key = e.raw
+  else
+    local cp = commonPart(name, e.raw):gsub("^%s+", ""):gsub("%s+$", "")
+    r.key = (utf8.len(norm(cp)) or 0) >= 2 and cp or e.raw
+  end
+  return r
+end
+
+local function writeNames(list, map, why)
+  local lines = {
+    "# LINE の今のトーク名（一覧の上から）",
+    "time: " .. os.date("%Y-%m-%d %H:%M:%S"),
+    "version: " .. VERSION,
+    "# 非公開（Dropbox）。一覧の各行の名前だけで、会話の中身は入れていない",
+    "",
+  }
+  if not list then lines[#lines + 1] = "集められなかった: " .. tostring(why) end
+  for _, e in ipairs(list or {}) do
+    lines[#lines + 1] = e.raw .. (e.exact and "" or "\t（OCR で読んだ文字）")
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "# TARGETS → 今の名前"
+  for _, t in ipairs(TARGETS) do
+    local name = targetName(t)
+    local r = map[name]
+    if not r or not r.found then
+      lines[#lines + 1] = string.format("%s → 決められない（一番近い: %s %.2f）", name,
+        r and r.near and r.near.raw or "なし", r and r.sim or 0)
+    elseif r.same then
+      lines[#lines + 1] = name .. " → " .. r.raw .. "（同じ名前）"
+    else
+      lines[#lines + 1] = string.format("%s → %s（近さ %.2f。「%s」で探す）", name, r.raw, r.sim, r.key)
+    end
+  end
+  hs.fs.mkdir(DEBUG_DIR)
+  local fh = io.open(DEBUG_DIR .. "/names.txt", "w")
+  if fh then fh:write(table.concat(lines, "\n") .. "\n"); fh:close() end
+end
+
+-- 書き出しの前に今の名前を集めて、TARGETS ごとの「今の名前」を返す。
+-- 集められない時（窓が無い・押す所に物が重なる 等）は空（TARGETS の名前のまま探す）。
+-- 人の操作で止まった時は、その error をそのまま上へ（全体を止める）。
+local function prepareNames(app)
+  local map, list, why = {}, nil, nil
+  local win = ensureWindow(app)
+  if win then
+    local ok, r1, r2 = pcall(harvestNames, win)
+    if ok then list, why = r1, r2
+    elseif type(r1) == "table" and r1.abort then error(r1, 0)
+    else why = type(r1) == "table" and r1.blocked or tidy(r1) end
+  else
+    why = "LINE の窓が開かない"
+  end
+  for _, t in ipairs(TARGETS) do
+    local name = targetName(t)
+    map[name] = realFor(name, list)
+  end
+  pcall(writeNames, list, map, why)
+  local found, renamed = 0, 0
+  for _, r in pairs(map) do
+    if r.found then found = found + 1; if not r.same then renamed = renamed + 1 end end
+  end
+  log(string.format("今のトーク名 %d 件を集めた（TARGETS %d 件のうち %d 件を結び付け、うち名前が変わっていた %d 件）%s",
+    list and #list or 0, #TARGETS, found, renamed, list and "" or ("。集められず: " .. tostring(why))))
+  return map, list
 end
 
 local function openChat(ctx, win)
@@ -1282,6 +1540,21 @@ local function maskedSave(cur)
     (cur:match("%.txt$") and ".txt" or "")
 end
 
+-- 保存名が書き出したいトークか。TARGETS の名前と同じ（nameMatches）か、書き出しの
+-- 前に集めた今の名前と同じ。今の名前が OCR で読んだ文字の時は読み違いがあるので、
+-- 近さ 0.8 以上で認める（「パプリカ🌶️」を OCR が「パプリカ》」と読んだ等。
+-- 「パプリカ会議」のような別のトークはここで止まる）
+local function saveNameOK(cur, ctx)
+  if nameMatches(cur, ctx.name) then return true end
+  local r = ctx.real
+  if not (r and cur:match("^%[LINE%]")) then return false end
+  if nameMatches(cur, r.raw) then return true end
+  if r.exact then return false end
+  local body = cur:gsub("%.txt$", ""):gsub("^%[LINE%]", "")
+  body = norm(body):gsub("^chatwith", ""):gsub("とのトーク$", ""):gsub("のトーク$", "")
+  return nameSim(countless(body), countless(r.n)) >= 0.8
+end
+
 local function saveAndMove(ctx, app, st)
   local sheet = waitFor(function() return findSheet(app) end, 6)
   if not sheet then
@@ -1299,7 +1572,7 @@ local function saveAndMove(ctx, app, st)
     return failSheet(ctx, app, "保存ダイアログ", "トークの保存ダイアログに見えない", "名前欄: " .. maskedSave(cur))
   end
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
-  if not nameMatches(cur, ctx.name) then
+  if not saveNameOK(cur, ctx) then
     local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
     e.otherChat = true                            -- 別のトークだった（次の候補があれば試す）
     return nil, e
@@ -1372,16 +1645,6 @@ local function saveAndMove(ctx, app, st)
   return dst
 end
 
--- 想定外のエラー文（Lua のファイルパス入り）からホームのパスを ~ にする
-local function tidy(s)
-  s = tostring(s)
-  local i, j = s:find(HOME, 1, true)
-  while i do
-    s = s:sub(1, i - 1) .. "~" .. s:sub(j + 1)
-    i, j = s:find(HOME, i + 1, true)
-  end
-  return s
-end
 
 -- heartbeat（公開）用は決まった文言と画像の置き場だけ。detail（伏せ字済み）は
 -- コンソールと診断ファイル（Dropbox）だけに出す。
@@ -1433,6 +1696,13 @@ end
 local function exportOne(app, name, opts)
   opts = opts or {}
   local ctx = { name = name, tn = norm(name), dry = opts.dry, trace = opts.trace or {} }
+  -- 書き出しの前に集めた今の名前（名前が変わっていた時だけ。同じならこれまでどおり）
+  local r = opts.real
+  if r and r.found and not r.same then
+    ctx.real, ctx.tn, ctx.key = r, countless(r.n), r.key
+    note(ctx, "名前", string.format("今の一覧では %s（近さ %.2f）。「%s」で探す",
+      masked(r.raw), r.sim, masked(r.key)))
+  end
   local ok, r1, r2 = pcall(exportSteps, app, ctx)
   if ok then return r1, r2 end
   if type(r1) == "table" and r1.blocked then
@@ -1797,7 +2067,21 @@ local function tryOne(name, dry)
   end
   local trace = {}
   result.trace = trace
-  local okc, ok, e = pcall(exportOne, app, name, { dry = dry, trace = trace })
+  -- 今のトーク名を集めてから（TARGETS の名前が古くても、今の名前で探す）
+  local okn, map, list = pcall(prepareNames, app)
+  if not okn then
+    if type(map) == "table" and map.abort then
+      endRun()
+      log("中断: " .. map.abort)
+      result.e = { stage = "中断", msg = map.abort }
+      out("✗ 中断（今のトーク名を集めている時）: " .. map.abort)
+      out("    次にすること: " .. hintFor(result.e))
+      return finish("LINE書き出しを中断: " .. map.abort)
+    end
+    map, list = {}, nil
+  end
+  local okc, ok, e = pcall(exportOne, app, name,
+    { dry = dry, trace = trace, real = map[name] or (list and realFor(name, list)) })
   endRun()
   for _, s in ipairs(trace) do out("✓ " .. s.stage .. ": " .. s.text) end
   if not okc then
@@ -1891,7 +2175,17 @@ local function runExport(auto)
   end
   if DONE.day ~= today() then DONE = { day = today(), ok = {} } end
   local okN, ngN, ngLines, stopped, results = 0, 0, {}, nil, {}
+  -- 書き出しの前に今のトーク名を集める（今日まだ書き出していないものがある時だけ）
+  local real, left = {}, false
+  for _, t in ipairs(TARGETS) do if not (auto and DONE.ok[targetName(t)]) then left = true end end
+  if left then
+    local okn, r = pcall(prepareNames, app)
+    if okn then real = r
+    elseif type(r) == "table" and r.abort then stopped = r.abort .. "（今のトーク名を集めている時に中断）"
+    else log("今のトーク名を集められなかった: " .. tidy(type(r) == "table" and r.blocked or r)) end
+  end
   for i, t in ipairs(TARGETS) do
+    if stopped then break end
     local name = targetName(t)
     if auto and DONE.ok[name] then
       okN = okN + 1; log("済み " .. name .. "（今日の前の実行で書き出し済み）")
@@ -1899,7 +2193,7 @@ local function runExport(auto)
     end
     -- 1件の想定外エラーで残りを止めず、heartbeat も必ず書く
     local trace = {}
-    local okc, ok, e = pcall(exportOne, app, name, { trace = trace })
+    local okc, ok, e = pcall(exportOne, app, name, { trace = trace, real = real[name] })
     if not okc then
       if type(ok) == "table" and ok.abort then
         stopped = ok.abort .. "（" .. i .. "/" .. #TARGETS .. " 件目で中断）"
