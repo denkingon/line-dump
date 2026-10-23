@@ -319,7 +319,27 @@ local function score(tn, s)
 end
 
 -- 保存名とトーク名の照合用。ファイル名では / が _ や : に化けるので記号も落とす。
-local function loose(s) return (norm(s):gsub("%p", "")) end
+-- 保存名とトーク名の照合用。名前欄の値は OCR でなく LINE が付けた正確な文字
+-- なので、norm() の OCR 向けの読み替え（ー・一・ダッシュ → -、卜 → ト）も記号の
+-- 削除もしない（「村田研一」「村田研ー」「(Berry)」を「村田研」「Berry」と別に扱う）。
+-- 落とすのは空白・絵文字だけ。全角英数は半角・小文字にそろえ、ファイル名で化ける
+-- / : _ だけを同じ字とみなす。
+local function loose(s)
+  local ok, r = pcall(function()
+    local out = {}
+    for _, c in utf8.codes(tostring(s or "")) do
+      if not skipped(c) then
+        if c >= 0xFF01 and c <= 0xFF5E then c = c - 0xFEE0 end   -- 全角→半角
+        if c >= 0x41 and c <= 0x5A then c = c + 32 end           -- A-Z → a-z
+        if c == 0x2F or c == 0x3A then c = 0x5F end              -- / : → _
+        out[#out + 1] = utf8.char(c)
+      end
+    end
+    return table.concat(out)
+  end)
+  if ok then return r end
+  return (tostring(s or ""):gsub("%s+", ""))
+end
 
 local function isLabel(n, labels)
   for _, lab in ipairs(labels) do
@@ -685,11 +705,13 @@ local function ensureWindow(app)
   for _ = 1, 3 do
     guard()
     app:activate(true); wait(0.8)
+    guard()                                       -- 待つ間に人が戻ったら、窓を動かさない
     local win = findMain(app)
     if win then
       local sf, f = screenOf(win), win:frame()
       if math.abs(f.w - sf.w) > 40 or math.abs(f.h - sf.h) > 40 then
         win:setFrame(sf, 0); wait(0.6)            -- 広い方が名前が切れずに読める
+        guard()
       end
       -- メイン窓を最前面・キー窓にする（別窓で開いたトークにキー入力が行かないように）
       win:focus(); wait(0.4)
@@ -699,6 +721,7 @@ local function ensureWindow(app)
     -- 窓が無い・見えない・検索欄が読めない・前面に来ない → Dock クリック相当で開き直す。
     -- hs.application.open / activate では窓が戻らない（実測）。Escape は使わない
     -- （LINE は Escape で窓やトークを閉じる。10/14 の連鎖失敗の元凶）。
+    guard()
     hs.execute("/usr/bin/open -b " .. LINE_BUNDLE); wait(2)
   end
   return nil
@@ -1287,7 +1310,9 @@ local NO_HINT = "この Mac ですることは無い。診断と撮影画像を 
                 " に残したので、Claude に「LINE書き出しの診断を見て直して」と頼む"
 local function hintFor(e)
   local st, detail = e.stage, tostring(e.detail or "")
-  if st == "窓" or st == "検索欄" then
+  if tostring(e.msg):find("保存ダイアログを閉じられない", 1, true) then
+    return "LINE に保存ダイアログが出たままになっている。その「キャンセル」を手で押して閉じてから、もう一度"
+  elseif st == "窓" or st == "検索欄" then
     return "LINE を開いて、トークの一覧（検索欄のある画面）を出しておく。別窓で開いたトークは閉じる"
   elseif st == "OCR" and detail:find("画面を撮れない", 1, true) then
     return "画面収録の許可を確かめる（システム設定 → プライバシーとセキュリティ → " ..
@@ -1444,7 +1469,7 @@ end
 local function writeResult(r)
   local f = io.open(RESULT_PATH, "w")
   if not f then return end
-  f:write("day=" .. today() .. "\nversion=" .. (r.version or VERSION) .. "\nng=" .. (r.ng or 0) .. "\n")
+  f:write("day=" .. (r.day or today()) .. "\nversion=" .. (r.version or VERSION) .. "\nng=" .. (r.ng or 0) .. "\n")
   for n in pairs(r.ok or {}) do f:write("ok=" .. n .. "\n") end
   if r.failed then f:write("failed=" .. r.failed:gsub("[\r\n]", " ") .. "\n") end
   if r.stopped then f:write("stopped=" .. r.stopped:gsub("[\r\n]", " ") .. "\n") end
@@ -1514,6 +1539,7 @@ local function statusLines()
   local day, aborts = readState()
   local res = todayResult()
   if res.failed then
+    -- 残すのは自動実行の「始められない」だけ（手動の失敗はその場でアラートとコンソールに出る）
     add(false, "今日の自動実行: 始められない（" .. res.failed .. "）。直れば次の確認で自動で始める")
   end
   if day == today() and aborts == nil then
@@ -1686,12 +1712,12 @@ end)()
 --   "failed" 始められない（画面収録の許可が無い・保存先が無い など）
 -- busy・notready・failed はその日の回数を使わない（直れば次の確認で始める）。
 local function runExport(auto)
+  local app, err, why
   if #TARGETS == 0 then
-    hs.alert.show("TARGETS が空です。line_export.lua を編集してください", 4)
-    log("TARGETS が空"); return "failed", "TARGETS が空"
+    err = "TARGETS が空（line_export.lua に書き出すトークの名前を書く）"
+  else
+    app, err, why = prepareApp(not auto)
   end
-
-  local app, err, why = prepareApp(not auto)
   if not app then
     log(err)
     if why == "notrunning" then
@@ -1704,8 +1730,7 @@ local function runExport(auto)
     if not auto or res.failed ~= err then
       hs.alert.show("LINE書き出し中止: " .. err, 6)
       writeHeartbeat(0, #TARGETS, { "全件: " .. err })
-      res.failed = err
-      writeResult(res)
+      if auto then res.failed = err; writeResult(res) end   -- 自動実行の「始められない」だけ残す
       writeReport("始められない: " .. err, {})
       runSync()
     end
@@ -1755,11 +1780,14 @@ local function runExport(auto)
   -- 毎回コンソールから貼ってもらうのは現実的でないため、push して共有する。
   -- 段ごとの経過と失敗した時の画面（伏せ字）・撮影画像は Dropbox に置く。
   -- 途中で止めた時は、前に最後まで回った時の失敗数と版を残す（新しい版でのやり直しの目安）
-  local res = todayResult()
+  -- 日付は始めた日（日をまたいで終わっても、次の日の分にしない）。始められたので
+  -- 「始められない」の印は消す
+  local res = readResult()
+  if res.day ~= DONE.day then res = { day = DONE.day, version = "", ng = 0, ok = {} } end
   if stopped then
-    res.ok, res.stopped = DONE.ok, stopped
+    res.ok, res.stopped, res.failed = DONE.ok, stopped, nil
   else
-    res = { version = VERSION, ng = ngN, ok = DONE.ok }
+    res = { day = DONE.day, version = VERSION, ng = ngN, ok = DONE.ok }
   end
   writeResult(res)
   writeHeartbeat(okN, ngN, ngLines, stopped and ("中断: " .. stopped))

@@ -185,6 +185,7 @@ end
 
 local function click(pt)
   W.clickN = W.clickN + 1
+  if W.knobs.jumpAtClick == W.clickN then T = T + 1300 end   -- 1回の上限（20分）を越える
   W.clicks[#W.clicks + 1] = { x = pt.x, y = pt.y }
   W.mouse = { x = pt.x, y = pt.y }; if not W.knobs.synthNoReset then W.lastHID = T end
   if W.knobs.userActsAtClick == W.clickN then W.pendingUser = "key" end
@@ -285,7 +286,7 @@ local function sheetEl()
       doSave(p)
     end }),
     el({ AXRole = "AXButton", AXTitle = "キャンセル" }, { AXPress = function()
-      if W.sheet.confirm then return end            -- 上書き確認が出ている間は効かない
+      if W.sheet.confirm or W.knobs.cancelIgnored then return end   -- 上書き確認が出ている間は効かない
       W.sheet = nil; W.focus = nil; W.cancelled = true
     end }),
   }
@@ -373,7 +374,7 @@ local winObj = {
   screen = function() return screenObj end,
   setFrame = function(_, r) if not W.knobs.noResize then W.win.x, W.win.y, W.win.w, W.win.h = r.x, r.y, r.w, r.h end end,
   snapshot = function() return nil end,
-  focus = function() if not W.knobs.cannotFocus then W.focusedOther = false end end,
+  focus = function() W.focusCalls = (W.focusCalls or 0) + 1; if not W.knobs.cannotFocus then W.focusedOther = false end end,
 }
 local otherWin = { id = function() return 77 end }
 local appObj = {
@@ -387,6 +388,9 @@ local appObj = {
   end,
   mainWindow = function() return W.win.exists and winObj or nil end,
   activate = function()
+    if W.knobs.userActsAtFirstActivate and not W.actDone then
+      W.actDone = true; W.pendingUser = "key"; W.knobs.frontIsOther = true   -- 人が戻って別のアプリを押した
+    end
     if W.stolen then
       W.stolen = false; W.reactivated = (W.reactivated or 0) + 1
       if W.knobs.userActsAtActivate then W.pendingUser = "key" end   -- 前に出し直している間に人が触った
@@ -431,6 +435,8 @@ local function execute(cmd)
   end
   if cmd:match("sync%.sh") then
     W.synced = W.synced + 1
+    if W.knobs.syncThrows then error("sync boom", 0) end
+    if W.knobs.syncOut then return W.knobs.syncOut, true end
     if W.knobs.syncFails then return "error: push に失敗。ネットワークか認証を確認する\n", true end
     return "push 完了\n", true
   end
@@ -2132,6 +2138,183 @@ test("update: git pull がうまくいった時だけ読み込み直す", functi
   check(not M.update() and not W.reloaded, "失敗したら読み込み直さない")
   local out = table.concat(W.logs, "\n")
   check(out:find("最新にできなかった", 1, true) and out:find("git status", 1, true) and W.consoleOpened, "理由と次にすること:\n" .. out)
+end)
+
+-- ===================== 3回目のレビューで見つかった穴（v4.1）=====================
+test("日をまたいで終わった実行の結果は、始めた日の分として残す（次の日に全部飛ばさない）", function()
+  reset()
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  local realdate = os.date
+  local shift = 0
+  os.date = function(fmt, t, ...)
+    if W.clickN >= 6 then shift = 86400 end      -- 6回押したところで日付が変わる
+    local tt = t or (os.time() + shift)
+    if fmt == "*t" then local r = realdate("*t", tt); r.hour = 9; return r end
+    return realdate(fmt, tt, ...)
+  end
+  local ok, err = pcall(function()
+    M._t.maybeRun()
+    local res = M._t.readResult()
+    check(res.day == TODAY, "始めた日の分: " .. res.day)
+    M = load()                                    -- 次の日にログインし直した
+    W.openLog = {}; W.lastHID = T - 999
+    M._t.maybeRun()
+  end)
+  os.date = realdate
+  if not ok then error(err, 0) end
+  check(#W.openLog == #M._t.targets, "次の日も全件を開いた: " .. #W.openLog)
+end)
+
+test("始められなかった後に始めて中断したら、「始められない」と言わない", function()
+  reset({ knobs = { noPermission = true } })
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  at9am(function()
+    M._t.maybeRun()
+    W.knobs.noPermission = false; W.lastHID = T - 999
+    M = load()
+    W.knobs.userActsAtClick = W.clickN + 4
+    M._t.maybeRun()
+  end)
+  W.logs = {}; M.status()
+  local out = table.concat(W.logs, "\n")
+  check(out:find("1 回中断", 1, true), "中断:\n" .. out)
+  check(not out:find("始められない", 1, true), "始められないと言わない:\n" .. out)
+end)
+
+test("自動実行が済んだ日に ⌘⌥⌃L が始められなくても、「自動で始める」とは言わない", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  W.knobs.noPermission = true
+  check(M._t.runExport(false) == "failed", "手動は始められない")
+  W.logs = {}; M.status()
+  local out = table.concat(W.logs, "\n")
+  check(not out:find("自動で始める", 1, true), "自動で始めるとは言わない:\n" .. out)
+end)
+
+test("自動実行が理由を残した後でも、⌘⌥⌃L は同じ理由をアラートで知らせて push する", function()
+  reset({ chats = chats({ "Berry" }), knobs = { noPermission = true } })
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  check(W.synced == 1, "自動実行で1回 push: " .. W.synced)
+  W.alerts = {}
+  check(M._t.runExport(false) == "failed", "failed")
+  check(table.concat(W.alerts, "\n"):find("LINE書き出し中止", 1, true), "アラートを出す")
+  check(W.synced == 2, "手動でも push する: " .. W.synced)
+end)
+
+test("昨日と同じ理由で今日も始められない時も、今日の分は1回残す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { noPermission = true } })
+  writefile(REPO .. "/mac/.last_result", "day=20000101\nversion=v4.1-00000000\nng=0\n" ..
+    "failed=Hammerspoon に「画面収録」が許可されていない（docs/setup-mac-auto.md）\n")
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  check(W.synced == 1 and heartbeat():find("last_run: " .. os.date("%Y-%m-%d"), 1, true), "今日の理由を push した")
+  W.logs = {}; M.status()
+  check(not table.concat(W.logs, "\n"):find("今日の自動実行: まだ", 1, true), "「まだ」と並べて出さない")
+end)
+
+test("TARGETS が空なら、毎分アラートを出さず、理由を1日1回だけ残す", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  for i = #M._t.targets, 1, -1 do table.remove(M._t.targets, i) end
+  at9am(function() for _ = 1, 4 do W.lastHID = T - 999; M._t.maybeRun() end end)
+  local n = 0
+  for _, a in ipairs(W.alerts) do if a:find("TARGETS が空", 1, true) then n = n + 1 end end
+  check(n == 1 and W.synced == 1, "1回だけ: alerts=" .. n .. " synced=" .. W.synced)
+  check(heartbeat():find("TARGETS が空", 1, true), "heartbeat に理由")
+end)
+
+test("窓を前に出している間に人が戻ったら、窓を動かさずに止める", function()
+  reset({ chats = chats({ "Berry" }), knobs = { userActsAtFirstActivate = true } })
+  W.win.w = 800                                   -- 画面いっぱいにする必要がある窓
+  local ok, err = pcall(exportOne, "Berry")
+  check(not ok and type(err) == "table" and err.abort, "中断した: " .. tostring(type(err) == "table" and (err.abort or err.blocked) or err))
+  check((W.focusCalls or 0) == 0 and W.opens == 0 and W.win.w == 800, "窓を動かしていない")
+end)
+
+test("保存名の照合は OCR 向けの読み替えをしない（「村田研一」は「村田研」ではない）", function()
+  reset()
+  local nm = load()._t.nameMatches
+  check(not nm("[LINE]村田研一.txt", "村田研"), "村田研一")
+  check(not nm("[LINE]村田研ー.txt", "村田研"), "村田研ー")
+  check(not nm("[LINE](Berry).txt", "Berry"), "(Berry)")
+  check(nm("[LINE]ＢＥＲＲＹ.txt", "Berry"), "全角英字は同じとみなす")
+  reset({ chats = { { name = "村田研一" } } })
+  local ok, e = exportOne("村田研")
+  check(not ok and e.stage == "保存ダイアログ" and not W.saved, "保存せずに止めた: " .. tostring(e and e.stage))
+end)
+
+test("check: 保存ダイアログを閉じられなかったら、手で閉じるよう言う", function()
+  reset({ chats = chats({ "Berry" }), knobs = { cancelIgnored = true } })
+  local M = load(); W.logs = {}
+  check(not M.check("Berry"), "NG")
+  local out = table.concat(W.logs, "\n")
+  check(out:find("次にすること: LINE に保存ダイアログが出たまま", 1, true), "手で閉じる:\n" .. out)
+  check(not W.saved and not W.pressedSave, "保存していない")
+end)
+
+test("自動実行で想定外のエラーが出ても、今日を済みにせず、画面を消さない設定を戻す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { syncThrows = true } })
+  local M = load()
+  local ok, err = pcall(function() at9am(function() M._t.maybeRun() end) end)
+  check(ok, "maybeRun はエラーを外に出さない: " .. tostring(err))
+  local st = (readfile(REPO .. "/mac/.last_run") or ""):gsub("%s", "")
+  check(st ~= TODAY, "今日を済みにしない: " .. st)
+  check(M.lastCheck and tostring(M.lastCheck.why):find("想定外", 1, true), "理由: " .. tostring(M.lastCheck and M.lastCheck.why))
+  check(W.displayIdle == false, "画面を消さない設定を戻した")
+end)
+
+test("maybeRun: 自動で始める時に手が動いていたら、中断に数えない", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  at9am(function() W.knobs.userBusy = true; M._t.maybeRun() end)
+  local st = readfile(REPO .. "/mac/.last_run") or ""
+  check(W.synced == 0 and #W.clicks == 0, "何もしていない")
+  check(not st:find(TODAY, 1, true), "今日の回数を使っていない: " .. st)
+  W.logs = {}; M.status()
+  local out = table.concat(W.logs, "\n")
+  check(not out:find("中断", 1, true) and out:find("手が動いていたので始めなかった", 1, true), "状態:\n" .. out)
+end)
+
+test("手動の中断は、自動実行の版と失敗数を書き換えない（新しい版でのやり直しが残る）", function()
+  reset()
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  writefile(REPO .. "/mac/.last_result", "day=" .. TODAY .. "\nversion=v4.1-00000000\nng=2\n")
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  W.knobs.userActsAtClick = W.clickN + 1; W.lastHID = T - 999
+  check(M._t.runExport(false) == "aborted", "中断した")
+  local res = M._t.readResult()
+  check(res.version == "v4.1-00000000" and res.ng == 2, "版と失敗数はそのまま: " .. res.version .. " " .. res.ng)
+  W.logs = {}; M.status()
+  check(table.concat(W.logs, "\n"):find("済み（失敗 2 件）。新しい版が入ったので", 1, true), "やり直す")
+end)
+
+test("時間切れで止めた時は、status に時間切れと出し、「触らない」とは言わない", function()
+  reset()
+  local M = load()
+  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
+  at9am(function() W.knobs.jumpAtClick = 2; M._t.maybeRun() end)
+  W.logs = {}; M.status()
+  check(table.concat(W.logs, "\n"):find("1 回中断（最後: 時間切れ", 1, true), "理由")
+  reset({ chats = chats({ "Berry" }), knobs = { jumpAtClick = 1 } })
+  local M2 = load(); W.logs = {}
+  M2.check("Berry")
+  local o2 = table.concat(W.logs, "\n")
+  check(o2:find("✗ 中断: 時間切れ", 1, true) and not o2:find("触らない", 1, true), "check:\n" .. o2)
+end)
+
+test("push: 変更なし・txt が無い時は「push できず」と言わない", function()
+  for _, so in ipairs({ "2026-10-23 07:05:00 変更なし（push不要）\n", "2026-10-23 07:05:00 取り込む txt が無い: /x\n" }) do
+    reset({ chats = chats({ "Berry" }), knobs = { syncOut = so } })
+    local M = load(); W.logs = {}
+    M.one("Berry")
+    local out = table.concat(W.logs, "\n")
+    check(out:find("/ 変更なし ===", 1, true) and not out:find("push できなかった", 1, true), "変更なし:\n" .. out)
+  end
 end)
 
 run("rm -rf " .. sh(ROOT))
