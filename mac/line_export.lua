@@ -224,6 +224,7 @@ local function ensureFront()
   local other = frontAppName()
   if RUN and RUN.app then
     pcall(function() RUN.app:activate(true) end); wait(0.6)
+    guard()                                       -- 待っている間の人の操作を見逃さない
     if lineFront() then
       log("warn: LINE が前面に無かった（前面: " .. other .. "）ので前に出し直した")
       return true
@@ -349,8 +350,16 @@ local function masked(s)
     local extra = (utf8.len(n) or 99) - (utf8.len(tn) or 0)
     if sc == 2 and extra <= 6 then return "〈" .. name .. "〉＋" .. extra .. "字" end
   end
-  if isLabel(n, SAVE_LABELS) or isLabel(n, MENU_HINTS) then return s end
-  for _, w in ipairs(UI_WORDS) do if n == norm(w) then return s end end
+  -- 決まった表示は、読めた文字ではなく決まった文言で出す（後ろに付いた字は字数だけ）
+  for _, labs in ipairs({ SAVE_LABELS, MENU_HINTS, UI_WORDS }) do
+    for _, lab in ipairs(labs) do
+      local ln = norm(lab)
+      if n == ln then return lab end
+      if labs ~= UI_WORDS and isLabel(n, { lab }) then
+        return lab .. "＋" .. ((utf8.len(n) or 0) - (utf8.len(ln) or 0)) .. "字"
+      end
+    end
+  end
   if s:match("^[%d%p%s]+$") then return "［数字］" end
   return "■" .. (utf8.len(s) or #s) .. "字"
 end
@@ -433,7 +442,8 @@ local function safeName(s) return (tostring(s):gsub("[/:%c\\]", "_")) end
 -- 撮影を DEBUG_DIR に残す。戻り値は heartbeat に書く形と、実際のパス。
 -- Retina の PNG は数 MB あるので、sips で縮めた JPEG にする（できなければ PNG のまま）。
 local function keepDebug(name, stage, cap, win)
-  if not cap then cap = capture(win, "fail", screenOf(win)) end
+  -- 撮影が無ければ LINE の窓だけを撮る（前面の他のアプリや通知は写さない。窓が無ければ撮らない）
+  if not cap then cap = capture(win, "fail") end
   if not cap then return nil end
   hs.fs.mkdir(DEBUG_DIR)
   local base = os.date("%Y%m%d-%H%M%S") .. "_" .. safeName(name) .. "_" .. safeName(stage)
@@ -573,11 +583,12 @@ end
 
 -- 検索欄を持つ窓＝メイン窓。トークを別窓で開いていると focusedWindow が
 -- そちらになることがあるので、全窓から探す。
-local function findMain(app)
+-- keepMinimized なら最小化された窓は戻さない（診断は画面に何も出さない）。
+local function findMain(app, keepMinimized)
   local best, bestArea
   for _, w in ipairs(app:allWindows() or {}) do
-    if w:isMinimized() then w:unminimize(); wait(0.5) end
-    if w:isVisible() and searchField(w) then
+    if w:isMinimized() and not keepMinimized then w:unminimize(); wait(0.5) end
+    if not w:isMinimized() and w:isVisible() and searchField(w) then
       local f = w:frame()
       if not best or f.w * f.h > bestArea then best, bestArea = w, f.w * f.h end
     end
@@ -690,14 +701,15 @@ end
 -- 左ペインの AX のセル（トーク名が載っている）。名前が合わないセルも枠ごと返す
 -- （OCR で見えた候補がどのセルの中か＝どの行かを数えるのに使う）。
 local function rowsByAX(win, paneX, below)
-  local rows = {}
+  local rows, wf = {}, win:frame()
   for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
                                function(e) return role(e) == "AXCell" end, 4000)) do
     local r = axFrame(cell)
     local t = bfs(cell, function(e)
       return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
     end, 40)
-    if r and r.x + r.w / 2 < paneX and r.y > below then
+    -- 窓の下に半分以上はみ出した行（スクロールで隠れた行）は見えていないとみなす
+    if r and r.x + r.w / 2 < paneX and r.y > below and r.y + r.h / 2 < wf.y + wf.h - 2 then
       rows[#rows + 1] = { el = cell, n = t and norm(attr(t, "AXValue")) or "",
                           x = r.x + r.w / 2, y = r.y + r.h / 2, f = r }
     end
@@ -935,11 +947,16 @@ local function openChat(ctx, win)
     return nil, why, cap, seen
   end
 
-  -- 1) 今の一覧に名前がそのまま（完全一致で）見えていれば、検索せずに押す
-  local cap = capture(win, "list")
-  local items, oerr = ocr(cap)
-  if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
-  local rows, top, many = pickRows(ctx, win, items, ff, paneX)
+  -- 1) 今の一覧に名前がそのまま（完全一致で）見えていれば、検索せずに押す。
+  --    検索欄が空（普段の一覧）の時だけ。前の件の検索結果には「メッセージ」の
+  --    行なども並び、そこから開くと古い所が開くので使わない
+  local cap, items, oerr, rows, top, many
+  if norm(attr(field, "AXValue") or "") == "" then
+    cap = capture(win, "list")
+    items, oerr = ocr(cap)
+    if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
+    rows, top, many = pickRows(ctx, win, items, ff, paneX)
+  end
   if rows and top == 3 then
     note(ctx, "トーク選択", "今の一覧に見えていた（検索しない）")
     local st, why, hcap, seen = open(rows[1], top, "一覧の行")
@@ -1704,8 +1721,11 @@ function M.diag(quiet)
   end
   local app = hs.application.find(LINE_BUNDLE)
   if not app then out("LINE が起動していない"); return finish("LINE が起動していない") end
-  local win = findMain(app) or app:focusedWindow() or app:mainWindow()
-  if not win then out("LINE の窓が見つからない（LINE を開いておく）"); return finish("LINE の窓が見つからない") end
+  local win = findMain(app, true) or (not quiet and (app:focusedWindow() or app:mainWindow())) or nil
+  if not win then
+    out("LINE の窓が見えない（最小化中なら戻さない。LINE を開いておく）")
+    return finish("LINE の窓が見えない")
+  end
   local cap = capture(win, "diag")
   local items, oerr = ocr(cap)
   if not items then out("OCR 診断: " .. tostring(oerr)); return finish(oerr) end
@@ -1765,11 +1785,45 @@ function M.help()
     "  __LINE_EXPORT.check(\"Berry\")  1件を「トークを保存」が見えるところまで試す（保存しない）",
     "  __LINE_EXPORT.one(\"Berry\")    1件だけ本当に書き出して push",
     "  __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）",
-    "  ⌘⌥⌃L 全件を今すぐ書き出す / ⌘⌥⌃J トーク名の一覧（⇧ 版でも可）",
+    "  __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）",
+    "  ⌘⌥⌃L 全件を今すぐ書き出す（⇧ 版でも可）",
     "  止めたいとき: マウスを動かすかキーを押す",
     "  コンソールの画面の文字は伏せ字（TARGETS の名前と LINE の決まった表示以外は ■n字）",
   }, "\n"))
   pcall(function() hs.openConsole(true) end)
+end
+
+-- トーク名の一覧（TARGETS に貼るため）。一覧の列の行だけを読む（トーク欄の
+-- メッセージも AX のセルなので、範囲を絞らないと会話の中身まで出てしまう）。
+-- 表示中の行しか取れないので、全部欲しければリストをスクロールしてからもう一度。
+function M.names()
+  local app = hs.application.find(LINE_BUNDLE)
+  if not app then hs.alert.show("LINEが見つからない", 3); return end
+  app:activate(true); wait(0.4)
+  local win = findMain(app)
+  local ff
+  if win then ff = select(2, searchField(win)) end
+  if not ff then hs.alert.show("LINE のトークの一覧（検索欄のある画面）を出しておく", 4); return end
+  local paneX = listRight(win, ff)
+  local names, seen, wf = {}, {}, win:frame()
+  for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
+                               function(e) return role(e) == "AXCell" end, 6000)) do
+    local r = axFrame(cell)
+    if r and r.x + r.w / 2 < paneX and r.y > ff.y + ff.h and r.y + r.h / 2 < wf.y + wf.h then
+      local t = bfs(cell, function(e)
+        return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
+      end, 40)
+      local v = t and tostring(attr(t, "AXValue"))
+      if v and not seen[v] then seen[v] = true; names[#names + 1] = v end
+    end
+  end
+  -- TARGETS に貼るための一覧なので、トーク名は伏せ字にしない（会話の中身は出さない）
+  print("=== LINE トーク一覧 " .. #names .. "件（TARGETS にそのまま貼れる形式）===")
+  for _, n in ipairs(names) do print(string.format('  "%s",', n)) end
+  print("=== ここまで。表示中の行のみ。足りなければリストをスクロールして再度 ⌘⌥⌃J ===")
+  pcall(function() hs.openConsole(true) end)
+  hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
+  return names
 end
 
 -- ---------- 毎日の自動実行 ----------
@@ -1831,6 +1885,10 @@ local function maybeRun()
   elseif r == "notready" then
     -- LINE を起動しただけ。その日の回数は使わずに次の確認でやり直す
     writeState(stateDay == day and (day .. ":" .. (aborts or 0)) or "")
+  elseif r == "failed" and retry then
+    -- 始められなくても、この版でのやり直しは1回だけ（毎分 heartbeat を書いて push しない）
+    local res = readResult()
+    writeResult(res.ng, res.ok)
   end
 end
 
@@ -1872,36 +1930,7 @@ M.waker:start()
 bindBoth("L", function() runExport(false) end)               -- 手動実行
 bindBoth("K", function() M.diag() end)                        -- 画面の読み取り診断
 
-bindBoth("J", function()                                      -- トーク名を一括取得
-  local app = hs.application.find(LINE_BUNDLE)
-  if not app then hs.alert.show("LINEが見つからない", 3); return end
-  app:activate(true); hs.timer.usleep(400000)
-  local win = findMain(app) or app:focusedWindow() or app:mainWindow()
-  if not win then hs.alert.show("LINEウィンドウ無し", 3); return end
-
-  -- トークリストの行は AX で取れる（⋮ と違ってツリーに乗っている）。
-  -- ただし表示中の行しか取れないので、全部欲しければリストをスクロールしてから押す。
-  local names, seen = {}, {}
-  for _, cell in ipairs(bfsAll(hs.axuielement.windowElement(win),
-                               function(e) return role(e) == "AXCell" end, 6000)) do
-    local t = bfs(cell, function(e)
-      return role(e) == "AXStaticText" and tostring(attr(e, "AXValue") or "") ~= ""
-    end, 40)
-    if t then
-      local v = tostring(attr(t, "AXValue"))
-      if not seen[v] then seen[v] = true; names[#names + 1] = v end
-    end
-  end
-
-  -- TARGETS に貼るための一覧なので、トーク名は伏せ字にしない（会話の中身は出さない）
-  print("=== LINE トーク一覧 " .. #names .. "件（TARGETS にそのまま貼れる形式）===")
-  for _, n in ipairs(names) do
-    print(string.format('  "%s",', n))
-  end
-  print("=== ここまで。表示中の行のみ。足りなければリストをスクロールして再度 ⌘⌥⇧J ===")
-  pcall(function() hs.openConsole(true) end)
-  hs.alert.show(string.format("%d件をコンソールに出力", #names), 3)
-end)
+bindBoth("J", function() M.names() end)                       -- トーク名を一括取得
 
 -- テスト用（mac/tests/test_line_export.lua から中身を検証する）
 M._t = {
@@ -1922,7 +1951,9 @@ if prevLoaded ~= VERSION then
   local f = io.open(LOADED_PATH, "w")
   if f then f:write(VERSION .. "\n"); f:close() end
   M.diagTimer = hs.timer.doAfter(30, function()
-    if not RUN and _G.__LINE_EXPORT == M then pcall(M.diag, true) end
+    if not RUN and _G.__LINE_EXPORT == M and not screenLocked() and not watchedScreen() then
+      pcall(M.diag, true)
+    end
   end)
 end
 
