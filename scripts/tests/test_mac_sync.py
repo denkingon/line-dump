@@ -173,16 +173,32 @@ class TestSyncSh(unittest.TestCase):
 
 
     def _github_origin(self, code):
-        """origin を GitHub の URL にし、公開かどうかの問い合わせ（curl）の答えを code にする"""
+        """origin を GitHub の URL にし、公開かどうかの問い合わせ（curl）の答えを code にする。
+        push 先だけはローカルの bare origin のまま（本物の GitHub には送らない）"""
         self.git("remote", "set-url", "origin", "https://github.com/denkingon/line-dump.git")
+        self.git("remote", "set-url", "--push", "origin", str(self.origin))
         fake = self.tmp / "bin"
         fake.mkdir()
-        (fake / "curl").write_text("#!/bin/sh\nprintf '%s' " + code + "\n")
+        self.curl_called = self.tmp / "curl_called"
+        (fake / "curl").write_text("#!/bin/sh\ntouch '" + str(self.curl_called) + "'\nprintf '%s' " + code + "\n")
         (fake / "curl").chmod(0o755)
         self.env["PATH"] = str(fake) + os.pathsep + self.env["PATH"]
 
+    def test_pushes_even_when_github_repo_is_public_by_default(self):
+        # 2026-10-24、持ち主が「公開のままでいい（非公開には後でする）」と決めた
+        self._github_origin("200")
+        self.env.pop("LINE_DUMP_ALLOW_PUBLIC", None)
+        r = self.sync()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("push 完了", r.stdout)
+        self.assertNotIn("公開になっているので", r.stdout)
+        self.assertIn("LINE書き出しを取り込み", self.origin_log())
+        self.assertTrue((self.work / "chats/田中.txt").exists())
+        self.assertFalse(self.curl_called.exists(), "公開かどうかを問い合わせて待たない")
+
     def test_refuses_to_ingest_or_push_when_github_repo_is_public(self):
         self._github_origin("200")
+        self.env["LINE_DUMP_ALLOW_PUBLIC"] = "0"
         head = self.git("rev-parse", "HEAD")
         r = self.sync()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -194,10 +210,19 @@ class TestSyncSh(unittest.TestCase):
 
     def test_refuses_when_visibility_cannot_be_checked(self):
         self._github_origin("000")
+        self.env["LINE_DUMP_ALLOW_PUBLIC"] = "0"
         r = self.sync()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("確かめられない", r.stdout)
         self.assertFalse((self.work / "chats/田中.txt").exists())
+
+    def test_private_repo_is_ingested_when_check_is_on(self):
+        self._github_origin("404")
+        self.env["LINE_DUMP_ALLOW_PUBLIC"] = "0"
+        r = self.sync()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("push 完了", r.stdout)
+        self.assertTrue(self.curl_called.exists())
 
 
 if __name__ == "__main__":

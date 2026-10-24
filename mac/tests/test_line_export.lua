@@ -3346,6 +3346,144 @@ test("昼の「見送り中」の診断ファイルには、その時の理由�
   check(not rep:find("秒後", 1, true) or not rep:find("約 %-"), "負の秒数を出さない")
 end)
 
+-- ===================== 状態ファイル（status.txt。2026-10-24 追加）=====================
+-- 10:58 の後、Mac から何も届かず、走らない理由がこちらから見えなかった
+local function status() return readfile(DEBUG .. "/status.txt") or "" end
+
+test("状態: 読み込んだらすぐ status.txt を書く（版・読み込んだ記録・状態）", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  local st = status()
+  check(st:find("why: 読み込んだ直後", 1, true) and st:find("version: " .. M._t.VERSION, 1, true), "見出し:\n" .. st)
+  check(st:find("== 状態", 1, true) and st:find("最後の確認: まだ", 1, true), "状態の行:\n" .. st)
+  check(st:find("== 自動更新の記録（古い順）\n  %d+:%d+ 読み込んだ: " .. M._t.VERSION:gsub("%-", "%%-")), "読み込んだ記録:\n" .. st)
+  check(not st:find("Berry", 1, true), "トーク名を入れない")
+end)
+
+test("状態: 1分ごとの確認の理由を記録し、同じ理由が続く間は1行にまとめる。書き直すのは10分ごと", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M
+  atClock(6, 45, function() M = load() end)
+  atClock(6, 50, function() M._t.tick(); M._t.tick(); M._t.tick() end)
+  check(status():find("why: 読み込んだ直後", 1, true), "10分経つまでは書き直さない")
+  W.lastHID = T - 5                                -- 07:00 を過ぎたら使用中
+  atClock(9, 0, function() M._t.tick() end)
+  local st = status()
+  check(st:find("why: 定期（10 分ごと）", 1, true), "10分経ったら書き直す:\n" .. st)
+  check(st:find("\n  06:50〜06:50（3 回） 07:00 より前\n", 1, true), "同じ理由は1行（回数つき）:\n" .. st)
+  check(st:find("\n  09:00 使用中（無操作 5 秒。180 秒で始める）\n", 1, true), "理由が変わったら次の行:\n" .. st)
+end)
+
+test("状態: 時計が戻っても（時刻合わせ等）status.txt を書き続ける", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M
+  atClock(15, 0, function() M = load() end)
+  atClock(9, 0, function() M._t.tick() end)
+  check(status():find("why: 定期", 1, true), "書き直した:\n" .. status())
+end)
+
+test("状態: 今日は済み（失敗あり）で新しい版が来た日に、使用中で見送り続けても理由が残る", function()
+  reset({ chats = chats({ "Berry" }) })
+  writefile(REPO .. "/mac/.last_run", os.date("%Y%m%d") .. "\n")
+  writefile(REPO .. "/mac/.last_result", "day=" .. os.date("%Y%m%d") .. "\nversion=v4.1-old\nng=8\n")
+  local M
+  atClock(13, 50, function() M = load() end)
+  W.lastHID = T - 5
+  atClock(14, 0, function() M._t.tick() end)
+  atClock(14, 11, function() M._t.tick() end)
+  local st = status()
+  check(st:find("今日の書き出し: 済み（失敗 8 件）。新しい版が入ったので、離席したら失敗分をやり直す", 1, true), "状態:\n" .. st)
+  check(st:find("14:00〜14:11（2 回） 使用中", 1, true), "見送りの理由:\n" .. st)
+  check(heartbeat() == "" and W.synced == 0 and #W.clicks == 0, "公開の heartbeat には書かず、何も押さない")
+end)
+
+test("状態: 確認の途中で想定外のエラーが出ても止まらず、理由を残す", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  local real = hs.caffeinate.sessionProperties
+  hs.caffeinate.sessionProperties = function() error("壊れた") end
+  local ok, err = pcall(function() atClock(9, 30, function() M._t.tick() end) end)
+  hs.caffeinate.sessionProperties = real
+  check(ok, "tick は例外を外に出さない: " .. tostring(err))
+  check(M.lastCheck and M.lastCheck.why:find("確認の途中で想定外のエラー", 1, true), "最後の確認に残す")
+  check(table.concat(W.logs, "\n"):find("error: 確認の途中で想定外のエラー", 1, true), "ログにも出す")
+end)
+
+test("状態: 自動更新で読み込み直しても、確認と自動更新の記録を引き継ぐ", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = loadCopy()
+  atClock(6, 10, function() M._t.tick() end)
+  check(M._t.selfUpdate("テスト") == "same", "まず新しい版なし")
+  appendCopy("\n-- 直した版\n")
+  check(M._t.selfUpdate("テスト") == "reloaded", "読み込み直した")
+  local M2 = _G.__LINE_EXPORT
+  local st = status()
+  check(st:find("version: " .. M2._t.VERSION, 1, true) and st:find("why: 読み込んだ直後", 1, true), "新しい版で書き直す:\n" .. st)
+  check(st:find("06:10 07:00 より前", 1, true), "前の版の確認の記録:\n" .. st)
+  local a = st:find("読み込んだ: " .. M._t.VERSION, 1, true)
+  local b = st:find("新しい版なし", 1, true)
+  local c = st:find("読み込んだ: " .. M2._t.VERSION, 1, true)
+  check(a and b and c and a < b and b < c, "自動更新の記録（前の版を読み込んだ → 新しい版なし → 新しい版を読み込んだ）:\n" .. st)
+end)
+
+test("状態: 続けて新しい版を読み込んでも、版ごとに別の行に残す（版の名前はまとめない）", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = loadCopy()
+  local seen = { M._t.VERSION }
+  for i = 1, 3 do
+    appendCopy("\n-- 直した版 " .. i .. "\n")
+    check(_G.__LINE_EXPORT._t.selfUpdate("テスト") == "reloaded", "読み込み直した " .. i)
+    seen[#seen + 1] = _G.__LINE_EXPORT._t.VERSION
+  end
+  local st = status()
+  for _, v in ipairs(seen) do check(st:find("読み込んだ: " .. v, 1, true), v .. " の行:\n" .. st) end
+  check(not st:find("回） 読み込んだ", 1, true), "まとめていない:\n" .. st)
+end)
+
+test("状態: 確認の理由は数字の違いをまとめ、自動更新の記録はまとめない", function()
+  reset()
+  local M = load()
+  M.checkLog, M.updateLog = nil, nil
+  M._t.remember("checkLog", "使用中（無操作 5 秒。180 秒で始める）", true)
+  M._t.remember("checkLog", "使用中（無操作 65 秒。180 秒で始める）", true)
+  M._t.remember("checkLog", "画面がロック中", true)
+  check(#M.checkLog == 2 and M.checkLog[1].n == 2 and M.checkLog[1].text:find("65 秒", 1, true),
+    "使用中は1行（最後の値）: " .. #M.checkLog)
+  M._t.remember("updateLog", "読み込んだ: v4.1-11111111")
+  M._t.remember("updateLog", "読み込んだ: v4.1-22222222")
+  M._t.remember("updateLog", "読み込んだ: v4.1-22222222")
+  check(#M.updateLog == 2 and M.updateLog[2].n == 2, "版ごとに別の行: " .. #M.updateLog)
+  for i = 1, 50 do M._t.remember("checkLog", "理由" .. string.rep("あ", i)) end
+  check(#M.checkLog == 40 and M.checkLog[40].text == "理由" .. string.rep("あ", 50), "最後の 40 行だけ持つ: " .. #M.checkLog)
+end)
+
+test("状態: 自動更新の失敗も記録に残す（git pull の失敗・読み込みの失敗）", function()
+  reset({ chats = chats({ "Berry" }), knobs = { pullFails = true } })
+  local M = loadCopy()
+  check(M._t.selfUpdate("テスト") == "pullfail", "pull に失敗")
+  M._t.writeStatus("テスト")
+  check(status():find("== 自動更新の記録（古い順）\n[^=]*git pull に失敗"), "pull の失敗を記録に:\n" .. status())
+  reset({ chats = chats({ "Berry" }) })
+  M = loadCopy()
+  local src = readfile(SELF_COPY)
+  writefile(SELF_COPY, (src:gsub("\nreturn M%s*$", "\nerror('新しい版の読み込みで失敗')\nreturn M\n")))
+  check(M._t.selfUpdate("テスト") == "failed", "読み込みに失敗")
+  _G.__LINE_EXPORT._t.writeStatus("テスト")
+  check(status():find("== 自動更新の記録（古い順）\n[^=]*新しい版の読み込みに失敗したので元の版に戻した"), "読み込みの失敗:\n" .. status())
+end)
+
+test("状態: 書き出した後の status.txt にもトーク名を入れない", function()
+  reset({ chats = chats({ "Berry", "Cherry Pie", "Dango" }) })
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  check(W.saved, "書き出した")
+  M.statusAt = nil
+  at9am(function() M._t.tick() end)
+  local st = status()
+  check(st:find("why: 定期", 1, true) and st:find("今日の書き出し: 済み", 1, true), "書き出し後の状態:\n" .. st)
+  for _, n in ipairs({ "Berry", "Cherry", "Dango" }) do check(not st:find(n, 1, true), n .. " を入れない:\n" .. st) end
+end)
+
 run("rm -rf " .. sh(ROOT))
 realprint(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

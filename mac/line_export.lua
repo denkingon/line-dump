@@ -2776,6 +2776,29 @@ function M.update()
   return true
 end
 
+-- 確認と自動更新の記録（status.txt に書く。書き出しが走らない日も、こちらから理由を
+-- 追えるように）。同じ理由が続く間は1行にまとめ、最後の LOG_KEEP 行だけ持つ。
+-- loose の時は数字の違いもまとめる（「使用中（無操作 35 秒）」が毎分変わるため。
+-- 版の名前を含む自動更新の記録はまとめない）。読み込み直しても前の版の分を引き継ぐ
+local LOG_KEEP = 40
+local function remember(key, text, loose)
+  local list = M[key] or {}
+  M[key] = list
+  local at = os.time()
+  local k = loose and (tostring(text):gsub("%d+", "#")) or tostring(text)
+  local last = list[#list]
+  if last and last.key == k then
+    last.to, last.n, last.text = at, last.n + 1, text
+  else
+    list[#list + 1] = { from = at, to = at, n = 1, text = text, key = k }
+    while #list > LOG_KEEP do table.remove(list, 1) end
+  end
+end
+local function updated(why, err)
+  M.lastUpdate = { at = os.time(), why = why, err = err }
+  remember("updateLog", why)
+end
+
 -- ---------- 自動更新 ----------
 -- GitHub の main に新しい版が来たら取り込み、読み込み直す（直した版を、この Mac で
 -- 手を動かさずに使えるように。2026-10-23 に了承を得た）。UPDATE_EVERY ごとと自動実行の
@@ -2786,7 +2809,7 @@ local function selfUpdate(why)
   if not AUTO_UPDATE or RUN then return "skip" end
   recoverRebase()                                 -- 止まった積み直しの間はブランチ名が無い
   if gitBranch() ~= "main" then
-    M.lastUpdate = { at = os.time(), why = "main 以外のブランチなので取り込まない" }
+    updated("main 以外のブランチなので取り込まない")
     return "notmain"
   end
   local ok, out = pullLatest()
@@ -2795,19 +2818,18 @@ local function selfUpdate(why)
     if not (M.lastUpdate and M.lastUpdate.err == msg) then   -- 同じ失敗は30分ごとに書かない
       log("warn: 自動更新の git pull に失敗（手元の変更があるか、ネットに繋がっていない）: " .. msg)
     end
-    M.lastUpdate = { at = os.time(), why = "git pull に失敗（手元の変更・ネットを確認）", err = msg }
+    updated("git pull に失敗（手元の変更・ネットを確認）", msg)
     return "pullfail"
   end
   local src = readAll(SELF)
   if not src or src == LOADED_SRC or src == _G.__LINE_EXPORT_BAD then
-    M.lastUpdate = { at = os.time(),
-                     why = (src and src == _G.__LINE_EXPORT_BAD) and "新しい版は読み込めないので次の版を待つ" or "新しい版なし" }
+    updated((src and src == _G.__LINE_EXPORT_BAD) and "新しい版は読み込めないので次の版を待つ" or "新しい版なし")
     return "same"
   end
   local chunk, err = load(src, "@" .. SELF)
   if not chunk then
     _G.__LINE_EXPORT_BAD = src
-    M.lastUpdate = { at = os.time(), why = "新しい版に文法の誤りがあり、読み込まなかった" }
+    updated("新しい版に文法の誤りがあり、読み込まなかった")
     log("error: 新しい版に文法の誤りがあるので読み込まない（今の版のまま動く）: " .. tidy(err))
     return "bad"
   end
@@ -2818,6 +2840,7 @@ local function selfUpdate(why)
   -- 新しい版の読み込みに失敗した: 元の版を読み込み直す（タイマーやホットキーを戻す）
   _G.__LINE_EXPORT_BAD = src
   log("error: 新しい版の読み込みに失敗したので元の版に戻す: " .. tidy(e))
+  updated("新しい版の読み込みに失敗したので元の版に戻した: " .. tidy(e):sub(1, 200))
   _G.__LINE_EXPORT_SRC = LOADED_SRC
   local old = load(LOADED_SRC, "@" .. SELF)
   if old then pcall(old) end
@@ -2859,7 +2882,10 @@ end
 
 -- ---------- 毎日の自動実行 ----------
 local skipLogged = {}
-local function checked(why) M.lastCheck = { at = os.time(), why = why } end
+local function checked(why)
+  M.lastCheck = { at = os.time(), why = why }
+  remember("checkLog", why, true)
+end
 -- 今日の heartbeat をもう書いたか（昼の「見送り中」を、読み込み直しても1日1回にする）
 local function heartbeatToday()
   return (readAll(REPO .. "/mac/heartbeat.txt") or ""):find("last_run: " .. os.date("%Y-%m-%d"), 1, true) ~= nil
@@ -2953,6 +2979,56 @@ local function maybeRun()
   if r == "done" or r == "aborted" then selfUpdate("自動実行の後") end
 end
 
+-- 今の状態を Dropbox の line-dump-debug/status.txt に書く（非公開。トークの名前も中身も
+-- 入れない）。読み込んだ時と、STATUS_EVERY ごと。書き出しが走らない日に、走らない理由
+-- （ロック・使用中・見送り・眠っていた・自動更新の失敗）を、この Mac に頼らずに見るため
+local STATUS_EVERY = 600
+local STATUS_PATH  = DEBUG_DIR .. "/status.txt"
+local function writeStatus(why)
+  M.statusAt = os.time()
+  hs.fs.mkdir(DEBUG_DIR)
+  local t = { "# LINE書き出しの状態（Mac が " .. STATUS_EVERY // 60 .. " 分ごとに書き直す。トークの名前も中身も入れない）",
+              "time: " .. os.date("%Y-%m-%d %H:%M:%S"), "version: " .. VERSION, "why: " .. why, "", "== 状態" }
+  for _, l in ipairs(statusLines()) do t[#t + 1] = "  " .. l end
+  local function section(title, list)
+    t[#t + 1] = ""
+    t[#t + 1] = "== " .. title
+    if not list or #list == 0 then t[#t + 1] = "  （まだ無い）" end
+    for _, e in ipairs(list or {}) do
+      t[#t + 1] = "  " .. clock(e.from) .. (e.n > 1 and ("〜" .. clock(e.to) .. "（" .. e.n .. " 回）") or "") ..
+                  " " .. e.text
+    end
+  end
+  section("確認の記録（" .. CHECK_EVERY .. " 秒ごと。古い順。同じ理由が続いた間は1行）", M.checkLog)
+  section("自動更新の記録（古い順）", M.updateLog)
+  local evs, recent = powerEvents(), {}
+  for i = #evs, math.max(1, #evs - 29), -1 do
+    recent[#recent + 1] = { from = evs[i].at, to = evs[i].at, n = 1,
+      text = (POWER_WORDS[evs[i].ev] or evs[i].ev) ..
+             ((evs[i].src ~= "" and evs[i].src ~= "-") and ("（" .. evs[i].src .. "）") or "") }
+  end
+  section("眠り・ロックの記録（新しい順。最大 30）", recent)
+  local f = io.open(STATUS_PATH, "w")
+  if not f then return false end
+  f:write(table.concat(t, "\n") .. "\n"); f:close()
+  return true
+end
+
+-- 1分ごとの確認。確認で想定外のエラーが出ても、理由を記録に残して止まらない
+-- （黙って止まると、こちらからは何も見えない）。STATUS_EVERY ごとに状態も書く
+local function tick()
+  local ok, err = pcall(maybeRun)
+  if not ok then
+    log("error: 確認の途中で想定外のエラー: " .. tidy(err))
+    checked("確認の途中で想定外のエラー: " .. tidy(err):sub(1, 200))
+  end
+  -- 時計が戻った時（時刻合わせ等）も止まらないように、差は絶対値で見る
+  if not RUN and (not M.statusAt or math.abs(os.time() - M.statusAt) >= STATUS_EVERY) then
+    local okw, e = pcall(writeStatus, "定期（" .. STATUS_EVERY // 60 .. " 分ごと）")
+    if not okw then log("warn: status.txt を書けない: " .. tidy(e)) end
+  end
+end
+
 -- 二重読み込み対策。init.lua に dofile 行が複数入っていたり、Reload を
 -- 繰り返したりしても、タイマーとホットキーが多重にならないようにする
 -- （多重になると 07:00 に自動操作が同時に2本走り、LINE の画面を奪い合う）。
@@ -2962,6 +3038,7 @@ if _G.__LINE_EXPORT then
     if prev[k] then pcall(function() prev[k]:stop() end) end
   end
   for _, hk in ipairs(prev.hotkeys or {}) do pcall(function() hk:delete() end) end
+  M.checkLog, M.updateLog = prev.checkLog, prev.updateLog     -- 記録は引き継ぐ
   log("前回の読み込み分を解除して張り直します")
 end
 _G.__LINE_EXPORT = M
@@ -2976,7 +3053,7 @@ local function bindBoth(k, fn)
   end
 end
 
-M.timer = hs.timer.doEvery(CHECK_EVERY, maybeRun)
+M.timer = hs.timer.doEvery(CHECK_EVERY, tick)
 if AUTO_UPDATE then M.updater = hs.timer.doEvery(UPDATE_EVERY, function() selfUpdate("定期確認") end) end
 local POWER_EVENTS = { systemWillSleep = "sleep", systemDidWake = "wake", screensDidLock = "lock",
                        screensDidUnlock = "unlock", screensDidSleep = "off", screensDidWake = "on",
@@ -2991,7 +3068,7 @@ M.waker = hs.caffeinate.watcher.new(function(ev)
      or ev == w.sessionDidBecomeActive then
     -- 復帰直後は落ち着くまで少し待つ（タイマーは M に持たせる。持たないと
     -- ガベージコレクションで消えて発火しないことがある）
-    M.wakeTimer = hs.timer.doAfter(120, maybeRun)
+    M.wakeTimer = hs.timer.doAfter(120, tick)
   end
 end)
 M.waker:start()
@@ -3010,6 +3087,7 @@ M._t = {
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
   statusLines = statusLines, readResult = readResult, selfUpdate = selfUpdate,
+  tick = tick, writeStatus = writeStatus, remember = remember, STATUS_EVERY = STATUS_EVERY,
   sleptThrough = sleptThrough, notePower = notePower,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,
   VERSION = VERSION,
@@ -3026,6 +3104,13 @@ if prevLoaded ~= VERSION then
       pcall(M.diag, true)
     end
   end)
+end
+
+-- 読み込んだことを記録し、すぐ状態を書く（新しい版が入ったか・動いているかを、こちらで見る）
+remember("updateLog", "読み込んだ: " .. VERSION)
+do
+  local okw, e = pcall(writeStatus, "読み込んだ直後")
+  if not okw then log("warn: status.txt を書けない: " .. tidy(e)) end
 end
 
 if not screenRecordingOK() then
