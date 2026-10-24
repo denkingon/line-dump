@@ -1,15 +1,20 @@
 -- =====================================================================
 -- LINE 自動エクスポート v4.1 → line-dump リポジトリへ push（Hammerspoon）
 --
---   毎日 RUN_AT 以降の離席中に、TARGETS のトークを Mac 版 LINE から
---   書き出し、mac/sync.sh を呼んでリポジトリに取り込み・push する。
+--   毎日 RUN_AT 以降の離席中に、普段のトークの一覧の上から LIST_TOP 件
+--   （最近やり取りした順）を Mac 版 LINE から書き出し、mac/sync.sh を呼んで
+--   リポジトリに取り込み・push する。名前で探さないので、トーク名を変えても追える。
+--   保存名は LINE が付ける名前のまま（日付を足す）。TARGETS は、名前で1件だけ
+--   試す時（check / one）と、診断で伏せ字にしない名前にだけ使う。
 --
 --   固定座標は使わず、画面を撮って OCR で文字を読み、見つけた所を押す。
 --   各段で画面を読み直して確かめてから次へ進み、違えばその段で止める。
 --     1. 窓      LINE のメイン窓を前面に。窓が無ければ open -b（Escape は使わない）
---     2. トーク  左の一覧に名前がそのまま見えていればその行を押す。見えなければ
---                検索欄に名前を入れ、出てきた行を押す
---                → ヘッダ（検索欄と同じ高さ）を OCR してトーク名を確認
+--     2. トーク  検索欄を空にして普段の一覧を出し、上の行から順に押す（行は各行の
+--                時刻を目印に OCR で拾う。下の行は一覧を送って読む）
+--                → ヘッダ（検索欄と同じ高さ）を OCR して、行の名前と合うか・押す前から
+--                変わったかで開いたことを確かめる
+--                （check / one で名前を指定した時は、一覧か検索で名前の行を探して押す）
 --                （LINE が AX で教える検索欄の位置は、フルスクリーンか窓かで画面と
 --                ずれるので、毎回その場で検索欄の文字を OCR して画面の位置に直す）
 --     3. メニュー ⋮（窓右端−24, ヘッダのトーク名と同じ高さ）を押す
@@ -31,7 +36,7 @@
 --     __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）
 --     __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）
 --     __LINE_EXPORT.update()        今すぐ最新の版にする（ふだんは30分ごとの自動更新に任せてよい）
---   ホットキー: 全件を今すぐ ⌘⌥⌃L / 診断 ⌘⌥⌃K / トーク名一覧 ⌘⌥⌃J（⇧ 版でも可）
+--   ホットキー: 一覧の上から LIST_TOP 件を今すぐ ⌘⌥⌃L / 診断 ⌘⌥⌃K / トーク名一覧 ⌘⌥⌃J（⇧ 版でも可）
 --   status / check / one / diag の出力の画面の文字は伏せ字にする（TARGETS の名前と
 --   LINE の決まった表示以外は「■n字」）。そのまま貼って共有しても会話の中身は出ない
 --   （names はトーク名の一覧を出す。会話の中身は出さない）。
@@ -45,7 +50,12 @@ local REPO    = os.getenv("LINE_DUMP_REPO") or (HOME .. "/Document/line-dump")
 local OUT_DIR = os.getenv("LINE_DUMP_RAW_DIR") or (HOME ..
   "/Library/CloudStorage/Dropbox-SFC-CNS/Ryo Murata/Backups/Linetxt")
 
--- 書き出す対象（トーク名だけ。v3 までの "full"/"official" の型指定は不要）。
+-- 毎日書き出すのは、普段のトークの一覧の上から LIST_TOP 件（最近やり取りした順。
+-- 「同時に20人以上とは話さないし、更新されるのは上の方のトークだけ」）。
+-- 「トークを保存」が無いトーク（Keep メモ・公式アカウントなど）は飛ばす。
+local LIST_TOP = 20
+
+-- 名前で1件だけ試す時（check / one）の名前と、診断で伏せ字にしない名前。
 --
 -- 一覧に名前がそのまま見えていればその行を、見えなければ検索欄に入れて
 -- 絞り込んだ行を、画面に出た名前と照合してから開く。照合は絵文字・空白・
@@ -822,22 +832,6 @@ local function sameText(v, n)
   return have >= math.max(2, math.ceil(vl * 0.6))
 end
 
--- 2つの名前（norm 済み）の近さ 0〜1。片方がもう片方を含めば 0.5 以上
--- （短い方/長い方の割合で上がる）。含まなければ同じ字の割合
-local function nameSim(a, b)
-  local la, lb = utf8.len(a) or 0, utf8.len(b) or 0
-  if la == 0 or lb == 0 then return 0 end
-  if a == b then return 1 end
-  local lo, hi = math.min(la, lb), math.max(la, lb)
-  if lo >= 2 and (a:find(b, 1, true) or b:find(a, 1, true)) then return 0.5 + 0.5 * lo / hi end
-  local want, common = {}, 0
-  for _, c in utf8.codes(a) do want[c] = (want[c] or 0) + 1 end
-  for _, c in utf8.codes(b) do
-    if (want[c] or 0) > 0 then want[c] = want[c] - 1; common = common + 1 end
-  end
-  return math.min(common / hi, 0.99)              -- 並びが違うだけの名前は同じとしない
-end
-
 local function measureShift(win, field, ffAX, items)
   local cy = ffAX.y + ffAX.h / 2
   local v = norm(attr(field, "AXValue") or "")
@@ -1176,16 +1170,9 @@ local function readList(ctx, win, field, ffAX)
   return items, cap
 end
 
--- ---------- 0. 今のトーク名を集める ----------
--- TARGETS の名前は古いことがある（LINE でトーク名を変えている）。1日1回、書き出しの
--- 前に検索欄を空にしてトークの一覧を上から下まで読み、今のトーク名を集めて
--- DEBUG_DIR/names.txt（Dropbox。非公開）に書く。TARGETS ごとに近い名前の候補も書く。
--- 候補は書き出しには使わない（名前が似ているだけの別のトーク「Berry」と「Berry2」を
--- 名前だけでは見分けられないため）。保存名は今までどおり TARGETS の名前と完全一致を
--- 求め、名前が変わったトークは names.txt を見て TARGETS を今の名前に直す。
--- 名前とみなすのは、一覧の各行の時刻と同じ高さ（時刻の 8pt 上〜12pt 下）の文字だけ。
--- その下の行（最後のメッセージ。実機で時刻の 20pt 下〜）は読まない。AX のセルに
--- 同じ文字があれば、その正確な文字（OCR の読み違いが無い）を使う。
+-- ---------- 一覧の行を読む ----------
+-- 一覧の各行の名前は、その行の時刻と同じ高さ（時刻の 8pt 上〜12pt 下）の文字だけ。
+-- その下の行（最後のメッセージ。実機で時刻の 20pt 下〜）は読まない。
 
 -- 一覧の右の列の時刻（12:34・昨日・月曜日・10/21 など）。未読数（数字だけ）は除く
 local function timeLike(s)
@@ -1204,7 +1191,7 @@ local function rowNames(items, ff, paneX)
     if it.y > ff.y + ff.h + 2 and it.x < paneX + 40 then
       if it.x > paneX - 70 then
         if timeLike(it.text) then times[#times + 1] = it end
-      elseif it.x > ff.x + 20 and it.n ~= "" then col[#col + 1] = it end
+      elseif it.x > ff.x + 20 and (it.n ~= "" or tidy(it.text) ~= "") then col[#col + 1] = it end   -- 絵文字だけの名前も
     end
   end
   table.sort(times, function(a, b) return a.y < b.y end)
@@ -1252,136 +1239,6 @@ local function clearSearch(field, ffAX, ff, measured)
     pcall(function() field:setAttributeValue("AXValue", "") end); wait(0.8)
   end
   return norm(attr(field, "AXValue") or "") == ""
-end
-
--- 今のトーク名を集める。戻り値: { {raw=表示の文字, n=norm, exact=AX の正確な文字か} … },
--- どこまで読んだか / nil, 理由
-local function harvestNames(win)
-  local field, ffAX = searchField(win)
-  if not ffAX then return nil, "検索欄が見つからない" end
-  local paneX = listRight(win, ffAX)
-  local ctx = {}
-  local items = readList(ctx, win, field, ffAX)
-  if not items then return nil, "OCR が動かない" end
-  if not clearSearch(field, ffAX, ctx.ff, ctx.dyMeasured) then return nil, "検索欄を空にできない" end
-  local f = win:frame()
-  local top = ctx.ff.y + ctx.ff.h
-  local mx, my = (ctx.ff.x + paneX) / 2, (top + f.y + f.h) / 2
-  local page = math.max(100, f.y + f.h - top - 90)      -- 1行ぶん重ねて送る
-  -- 送り方: まず点（pixel）単位。一覧が動かなければ行（line）単位に替える
-  -- （実機 10/24: pixel で送っても一覧が動かず、最初の 14 件しか集められなかった）。
-  -- 行単位の1行の量はアプリで違うので、少しずつ送り、新しい名前が出ない時だけ増やす
-  local unit, step, moved = "pixel", page, false
-  local function toTop() scrollList(mx, my, 20000, "pixel"); scrollList(mx, my, L.NAME_LINES_TOP, "line") end
-  toTop()                                                -- 一番上から読む
-  local list, seen, how = {}, {}, L.NAME_PAGES .. " ページで打ち切り（一覧の途中まで）"
-  local prevKey
-  for _ = 1, L.NAME_PAGES * 3 do
-    items = readList(ctx, win, field, ffAX)
-    if not items then how = "OCR が途中で止まった（一覧の途中まで）"; break end
-    local cells = rowsByAX(win, paneX, ctx.ff.y + ctx.ff.h, ctx.dy)
-    local rows, added = rowNames(items, ctx.ff, paneX), 0
-    for _, it in ipairs(rows) do
-      local raw, exact = it.text, false
-      for _, c in ipairs(cells) do
-        if c.raw and inside(it, c.f) and sameText(c.n, it.n) then raw, exact = c.raw, true end
-      end
-      local n = norm(raw)
-      if n ~= "" and not seen[n] then
-        seen[n] = true; added = added + 1
-        list[#list + 1] = { raw = raw, n = n, exact = exact }
-      end
-    end
-    if #list == 0 then how = "名前を読めなかった（一覧の行の時刻が見つからない）"; break end
-    -- 一覧が動いたかは、一番上に見えている行（名前と高さ）で見る
-    local key = rows[1] and (rows[1].n .. "@" .. math.floor(rows[1].y / 4 + 0.5)) or ""
-    if prevKey and key == prevKey then
-      if unit == "pixel" and not moved then
-        unit, step = "line", L.NAME_LINES                -- pixel が効かない: 行単位で送り直す
-      else
-        how = moved and ("一覧の終わりまで読んだ（" .. (unit == "line" and "行" or "点") .. "単位で送った）")
-                    or "一覧を下へ送れなかった（点・行単位とも一覧が動かない。最初の画面の分だけ）"
-        break
-      end
-    elseif prevKey then
-      moved = true
-      if unit == "line" and added == 0 then step = math.min(step * 2, L.NAME_LINES_MAX) end
-    end
-    prevKey = key
-    scrollList(mx, my, -step, unit)
-  end
-  toTop()                                                -- 一番上に戻しておく
-  return list, how
-end
-
--- TARGETS の名前に近い今の名前（近い順に3つまで。0.5 未満は出さない）。
--- 書き出しには使わず、names.txt に候補として書くだけ
-local function nearNames(name, list)
-  local tn, out = norm(name), {}
-  for _, e in ipairs(list or {}) do
-    local en = countless(e.n)
-    local sc = (en == tn or e.n == tn) and 1 or nameSim(tn, en)
-    if sc >= 0.5 then out[#out + 1] = { e = e, sc = sc } end
-  end
-  table.sort(out, function(a, b) return a.sc > b.sc end)
-  while #out > 3 do table.remove(out) end
-  return out
-end
-
-local function writeNames(list, how, why)
-  local lines = {
-    "# LINE の今のトーク名（一覧の上から）",
-    "time: " .. os.date("%Y-%m-%d %H:%M:%S"),
-    "version: " .. VERSION,
-    "# 非公開（Dropbox）。一覧の各行の名前だけで、会話の中身は入れていない",
-    list and ("# " .. #list .. " 件。" .. tostring(how)) or ("集められなかった: " .. tostring(why)),
-    "",
-  }
-  for _, e in ipairs(list or {}) do
-    lines[#lines + 1] = e.raw .. (e.exact and "" or "\t（OCR で読んだ文字）")
-  end
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = "# TARGETS ごとの近い名前（書き出しには使わない。名前が変わっていたら TARGETS を直す）"
-  for _, t in ipairs(TARGETS) do
-    local name, cands = targetName(t), {}
-    for _, c in ipairs(nearNames(name, list)) do
-      cands[#cands + 1] = c.sc == 1 and (c.e.raw .. "（同じ名前）") or string.format("%s（%.2f）", c.e.raw, c.sc)
-    end
-    lines[#lines + 1] = name .. " → " .. (#cands > 0 and table.concat(cands, " / ") or "近い名前なし")
-  end
-  hs.fs.mkdir(DEBUG_DIR)
-  local fh = io.open(DEBUG_DIR .. "/names.txt", "w")
-  if fh then fh:write(table.concat(lines, "\n") .. "\n"); fh:close() end
-end
-
--- 今のトーク名を集めて names.txt に書く。集められない時（窓が無い・押す所に物が
--- 重なる 等）は理由を書いて続ける。人の操作で止まった時は、その error をそのまま
--- 上へ（全体を止める）。前の件の保存ダイアログが残っていれば先に閉じる（出ている間は
--- クリックもスクロールも効かない）。
-local function prepareNames(app)
-  local list, how, why
-  if findSheet(app) and not cancelSheet(app) then
-    why = "残っていた保存ダイアログを閉じられない"
-  else
-    local win = ensureWindow(app)
-    if win then
-      local ok, r1, r2 = pcall(harvestNames, win)
-      if ok then list, how = r1, r2; if not r1 then why = r2 end
-      elseif type(r1) == "table" and r1.abort then error(r1, 0)
-      else why = type(r1) == "table" and r1.blocked or tidy(r1) end
-    else
-      why = "LINE の窓が開かない"
-    end
-  end
-  pcall(writeNames, list, how, why)
-  log(list and string.format("今のトーク名 %d 件を names.txt に書いた（%s）", #list, how)
-           or ("今のトーク名を集められなかった: " .. tostring(why)))
-end
-
--- names.txt を今日まだ書いていないか（集めるのは1日1回）
-local function namesStale()
-  local m = hs.fs.attributes(DEBUG_DIR .. "/names.txt", "modification")
-  return not m or os.date("%Y%m%d", m) ~= os.date("%Y%m%d")
 end
 
 local function openChat(ctx, win)
@@ -1633,8 +1490,27 @@ local function saveAndMove(ctx, app, st)
           and findButton(sheet, { "キャンセル", "Cancel" })) then
     return failSheet(ctx, app, "保存ダイアログ", "トークの保存ダイアログに見えない", "名前欄: " .. maskedSave(cur))
   end
+  -- 一覧の上から順に書き出す時（ctx.list）は、LINE の既定の保存名のまま保存する
+  -- （名前で探していないので、照らし合わせる名前が無い）。保存名で今日もう保存した
+  -- トークと分かれば保存しない: この実行で保存した（一覧が並び替わってまた開いた）
+  -- なら "dup-run"、今日の前の実行で保存した（中断の後のやり直し）なら "dup"
+  if ctx.list then
+    local body = cur:gsub("%.txt$", "")
+    body = body:gsub("^%[LINE%]", "")
+    local key = loose(body, true)
+    ctx.saveKey, ctx.saveName = key, cur
+    local same = ctx.list.lastKey ~= nil and key == ctx.list.lastKey
+    local seenRun, seenDay = ctx.list.thisRun[key], ctx.list.saved[key]
+    if same or seenRun or seenDay then
+      if not cancelSheet(app) then
+        return failSheet(ctx, app, "保存ダイアログ", "保存しないトークの保存ダイアログを閉じられない")
+      end
+      if same then return "same" end                -- 押した行が開かず、前のトークのまま
+      note(ctx, "保存ダイアログ", "今日もう保存したトーク（" .. maskedSave(cur) .. "）なので保存しない")
+      return seenRun and "dup-run" or "dup"
+    end
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
-  if not nameMatches(cur, ctx.name) then
+  elseif not nameMatches(cur, ctx.name) then
     local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
     e.otherChat = true                            -- 別のトークだった（次の候補があれば試す）
     return nil, e
@@ -1643,7 +1519,7 @@ local function saveAndMove(ctx, app, st)
   -- 絵文字まで書いてあれば別のトーク。書いていなければ、絵文字だけ違う別のトーク
   -- （「パプリカ🍅」）がまだ開いていない候補や前に開いた候補にあるかもしれないので、
   -- それが無い時だけ認める
-  if not sameWithEmoji(cur, ctx.name) then
+  if not ctx.list and not sameWithEmoji(cur, ctx.name) then
     local targetHasEmoji = loose(ctx.name) ~= loose(ctx.name, true)
     ctx.maybe = ctx.maybe or {}
     local others = false
@@ -1809,6 +1685,205 @@ local function exportOne(app, name, opts)
   error(r1, 0)
 end
 
+-- ---------- 一覧の上から順に書き出す（毎日の書き出し） ----------
+-- 普段のトークの一覧（検索欄が空の時。最近やり取りした順）の上から LIST_TOP 件を
+-- 順に開き、⋮ →「トークを保存」→ LINE の既定の保存名に日付を足して保存する。
+-- 名前で探さないので、トーク名を変えても追える（名前の照らし合わせも検索もしない）。
+-- 行は一覧の時刻を目印に OCR で拾い、行の名前の文字を押して開く。
+
+-- 2回読んだ一覧の両方に見える行の高さの差（下へ送ったら正。共通の行が無ければ nil）
+local function rowKey(r) return r.n ~= "" and r.n or ("raw:" .. tostring(r.text)) end
+local function shiftOf(before, after)
+  local by = {}
+  for _, r in ipairs(before or {}) do by[rowKey(r)] = r.y end
+  for _, r in ipairs(after or {}) do
+    if by[rowKey(r)] then return by[rowKey(r)] - r.y end
+  end
+  return nil
+end
+
+-- 一覧を下へ送る道具。点（pixel）単位で動かなければ行（line）単位に替え、行単位の
+-- 1行の量は最初に動いた時に測って、一覧の高さの 8 割ずつ送る（1行の量はアプリで
+-- 違う。実機 10/24 は点単位で一覧が動かなかった）。
+-- down(今の行, 読み直す関数) → 送った後の行 / nil（動かない＝一覧の終わりか送れない）
+local function newScroller(mx, my, page)
+  local sc = { unit = "pixel", step = page, measured = false, moved = false }
+  function sc.down(before, read)
+    for _ = 1, 2 do
+      scrollList(mx, my, -sc.step, sc.unit)
+      local after = read()
+      if not after then return nil end
+      local d = shiftOf(before, after)
+      if d == nil or d > 4 then
+        sc.moved = true
+        if sc.unit == "line" and not sc.measured and d then
+          sc.step = math.max(1, math.floor(sc.step * page * 0.8 / d))
+          sc.measured = true
+        end
+        return after
+      end
+      if sc.unit ~= "pixel" or sc.moved then return nil end
+      sc.unit, sc.step = "line", L.NAME_LINES        -- 点単位が効かない: 行単位で送り直す
+    end
+    return nil
+  end
+  function sc.top() scrollList(mx, my, 20000, "pixel"); scrollList(mx, my, L.NAME_LINES_TOP, "line") end
+  return sc
+end
+
+-- 行を押して開き、⋮ →「トークを保存」→ 保存する。開いたかは、ヘッダが押す前から
+-- 変わったか、行の名前とそのまま合う（今開いているトークの行を押した）かで見る
+-- （似ているだけの名前「トーク2番」「トーク3番」は合うとみなさない）。ヘッダの名前が
+-- 読めないトーク（1字・絵文字だけの名前）は、保存名で確かめる（前のトークと同じ
+-- 保存名なら開いていない）。⋮ はヘッダと同じ、検索欄の高さにある。
+-- 戻り値: 保存先 / "dup" / "dup-run" / nil, 失敗
+local function exportRow(app, ctx, win, row, prevHeader)
+  local f = win:frame()
+  local cy = ctx.ff.y + ctx.ff.h / 2
+  clickAt(row.x, row.y); wait(0.8)
+  local limit, hdr, hrow, cap = now() + 4, nil, nil, nil
+  while true do
+    cap = capture(win, "header")
+    local items, oerr = ocr(cap)
+    if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
+    hrow = headerRow(items, ctx.paneX, f, win:title(), ctx.ff)
+    for _, it in ipairs(hrow or {}) do
+      if countless(it.n) == countless(row.n) or score(row.n, it.n) == 3 then hdr = it; break end
+    end
+    if not hdr and hrow and hrow[1] and hrow[1].n ~= prevHeader then hdr = hrow[1] end
+    if hdr then break end
+    if now() >= limit then
+      if hrow and hrow[1] then
+        return fail(ctx, "トーク確認", "押した行のトークが開かない（ヘッダが押す前のまま）", cap, headerSeen(hrow))
+      end
+      hdr = { x = ctx.paneX + 120, y = cy, n = "", text = "" }   -- ヘッダの名前が読めない
+      break
+    end
+    wait(0.5)
+  end
+  ctx.headerN = hdr.n ~= "" and hdr.n or nil
+  note(ctx, "トーク確認", "一覧の行（" .. masked(row.text) .. "）を押して開いた（ヘッダ " ..
+    (hdr.text ~= "" and masked(hdr.text) or "読めない。保存名で確かめる") .. "）")
+  local st = { header = { x = hdr.x, y = math.abs(hdr.y - cy) <= L.HEADER_DY and hdr.y or cy, n = hdr.n } }
+  local ok, e = pressSaveChat(ctx, win, st)
+  if not ok then return nil, e end
+  local r1, r2 = saveAndMove(ctx, app, st)
+  if r1 == "same" then
+    return fail(ctx, "トーク確認", "押した行のトークが開かない（前のトークと同じ保存名）")
+  end
+  return r1, r2
+end
+
+-- 一覧の上から順に書き出す。R に結果を足していく:
+--   okN / ngN / ngLines（heartbeat 用。トーク名は書かない）/ results（診断用）/
+--   saved（今日保存したトークの保存名。中断の後のやり直しで飛ばす）/ list（names.txt 用）/
+--   stopped（人の操作などで中断した理由）
+local function exportList(app, R)
+  local ctx0 = { name = "一覧", trace = {} }
+  local function whole(stage, msg, cap, detail)
+    local _, e = fail(ctx0, stage, msg, cap, detail)
+    R.ngN = R.ngN + 1
+    R.ngLines[#R.ngLines + 1] = "一覧: " .. describe(e)
+    R.results[#R.results + 1] = { name = "一覧", ok = false, trace = ctx0.trace, e = e }
+  end
+  if findSheet(app) then
+    log("warn: 前の保存ダイアログが残っていたのでキャンセルする")
+    if not cancelSheet(app) then return whole("窓", "残っていた保存ダイアログを閉じられない") end
+  end
+  local win = ensureWindow(app)
+  if not win then return whole("窓", "LINE の窓が開かない・前面に来ない（検索欄のある窓が無い）") end
+  ctx0.win = win
+  local f = win:frame()
+  note(ctx0, "窓", string.format("メイン窓（x=%.0f y=%.0f %.0f×%.0f）を前面にした", f.x, f.y, f.w, f.h))
+  local field, ffAX = searchField(win)
+  if not ffAX then return whole("検索欄", "検索欄が見つからない") end
+  local paneX = listRight(win, ffAX)
+  ctx0.paneX = paneX
+  local items, cap, oerr = readList(ctx0, win, field, ffAX)
+  if not items then return whole("OCR", "OCR が動かない", cap, oerr) end
+  if not clearSearch(field, ffAX, ctx0.ff, ctx0.dyMeasured) then
+    return whole("検索欄", "検索欄を空にできない（普段の一覧に戻せない）", cap)
+  end
+  local top = ctx0.ff.y + ctx0.ff.h
+  local sc = newScroller((ctx0.ff.x + paneX) / 2, (top + f.y + f.h) / 2, math.max(100, f.y + f.h - top - 90))
+  sc.top()
+  local last
+  local function read()
+    local its
+    its, last = readList(ctx0, win, field, ffAX)
+    return its and rowNames(its, ctx0.ff, paneX) or nil, its
+  end
+  local rows, its = read()
+  if not rows then return whole("OCR", "OCR が動かない", last) end
+  if #rows == 0 then return whole("一覧", "一覧の行が読めない（各行の時刻が見つからない）", last) end
+  local h0 = headerRow(its, paneX, f, win:title(), ctx0.ff)
+  local prevHeader = h0 and h0[1] and h0[1].n or nil
+  local tried, thisRun, n, lastKey = {}, {}, 0, nil
+  while n < LIST_TOP and rows do
+    local row
+    for _, r in ipairs(rows) do
+      r.key = rowKey(r)                           -- 絵文字だけの名前は norm が空
+      if not tried[r.key] then row = r; break end
+    end
+    if not row then
+      rows = sc.down(rows, read)                  -- 見えている行は済んだ: 下へ送る
+    else
+      tried[row.key] = true
+      n = n + 1
+      local ctx = { name = "一覧の" .. n .. "番目", tn = row.n, trace = {}, win = win, paneX = paneX,
+                    ff = ctx0.ff, dy = ctx0.dy, list = { saved = R.saved, thisRun = thisRun, lastKey = lastKey } }
+      local okc, r1, r2 = pcall(exportRow, app, ctx, win, row, prevHeader)
+      if not okc then
+        if type(r1) == "table" and r1.abort then
+          R.stopped = r1.abort .. "（一覧の " .. n .. " 番目で中断）"
+          R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace,
+                                        e = { stage = "中断", msg = r1.abort } }
+          return
+        end
+        if type(r1) == "table" and r1.blocked then
+          r1, r2 = nil, select(2, fail(ctx, "クリック", r1.blocked))
+        else
+          r1, r2 = nil, { stage = "内部エラー", msg = tidy(r1) }
+        end
+      end
+      prevHeader = ctx.headerN or prevHeader
+      if ctx.saveKey then lastKey = ctx.saveKey end
+      local shown = ctx.saveName and maskedSave(ctx.saveName) or masked(row.text)
+      if r1 == "dup-run" then
+        n = n - 1                                   -- 並び替わって同じトークをまた開いた: 数えない
+      elseif r1 == "dup" then
+        R.okN = R.okN + 1
+        R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace, note = "（今日もう保存済み）" }
+        R.list[#R.list + 1] = { n = n, name = ctx.saveName or row.text, how = "今日もう保存済み" }
+      elseif r1 then
+        R.okN = R.okN + 1
+        R.saved[ctx.saveKey] = true; thisRun[ctx.saveKey] = true
+        log("OK  一覧の " .. n .. " 番目 → " .. shown)
+        R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
+                                      note = "→ " .. maskedSave(r1:match("[^/]+$") or r1) }
+        R.list[#R.list + 1] = { n = n, name = r1:match("[^/]+$") or r1, how = "保存した" }
+      elseif r2 and r2.stage == "メニュー" and tostring(r2.msg):find("見当たらない", 1, true) then
+        -- 「トークを保存」が無いトーク（Keep メモ・公式アカウントなど）は失敗に数えない
+        R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
+                                      note = "（⋮ に「トークを保存」が無いトークなので飛ばした）" }
+        R.list[#R.list + 1] = { n = n, name = row.text, how = "⋮ に「トークを保存」が無い" }
+      else
+        R.ngN = R.ngN + 1
+        log("NG  一覧の " .. n .. " 番目（" .. shown .. "）  " .. describe(r2, true))
+        R.ngLines[#R.ngLines + 1] = ctx.name .. ": " .. describe(r2)
+        R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace, e = r2 }
+        R.list[#R.list + 1] = { n = n, name = ctx.saveName or row.text, how = "失敗: " .. describe(r2) }
+      end
+      wait(0.5)
+      rows = read()                                 -- 開いた後の一覧（新着で並び替わることがある）
+    end
+  end
+  if n < LIST_TOP then
+    note(ctx0, "一覧", n .. " 件で一覧の終わり（" .. (sc.moved and "下へ送って読んだ" or "一覧が動かない") .. "）")
+  end
+  R.rowsTried = n
+end
+
 -- 失敗した時の「次にすること」（コンソール用）。この Mac で人が手を動かせば
 -- 直るものだけ具体的に書く。読み方・押し方の問題は、診断と撮影画像を Dropbox に
 -- 残すので、それを見て直した版を出す（Claude に「LINE書き出しの診断を見て直して」と頼む）。
@@ -1827,9 +1902,9 @@ local function hintFor(e)
     return "OCR（mac/ocr.applescript）が動かない。ターミナルで osascript " .. tidy(OCR_SCRIPT) ..
            " <画像> を試し、出たエラーを Claude に見せる"
   elseif st == "トーク選択" then
-    return "TARGETS の名前を LINE の今の表示どおりに直す（今のトーク名と近い名前は " .. DEBUG_SHOW .. "/names.txt）"
+    return "名前を LINE の今の表示どおりに書く（今のトーク名は ⌘⌥⌃J、今日書き出したトークは " .. DEBUG_SHOW .. "/names.txt）"
   elseif st == "保存ダイアログ" and tostring(e.msg):find("合わない", 1, true) then
-    return "トーク名が変わったのかもしれない。" .. DEBUG_SHOW .. "/names.txt の今の名前で TARGETS を直す"
+    return "トーク名が変わったのかもしれない。今の名前（⌘⌥⌃J）で試す"
   elseif st == "保存" and tostring(e.msg):find("上書き", 1, true) then
     return "過去の書き出しを上書きしないよう止めた。LINE で ⋮ →「トークを保存」を手で開き、名前欄に日付を足せるか確かめる"
   elseif st == "クリック" then
@@ -2311,13 +2386,23 @@ end)()
 --   "busy" 手が動いていて始めなかった / "notready" LINE を起動しただけ /
 --   "failed" 始められない（画面収録の許可が無い・保存先が無い など）
 -- busy・notready・failed はその日の回数を使わない（直れば次の確認で始める）。
-local function runExport(auto)
-  local app, err, why
-  if #TARGETS == 0 then
-    err = "TARGETS が空（line_export.lua に書き出すトークの名前を書く）"
-  else
-    app, err, why = prepareApp(not auto)
+-- 今日書き出したトークの一覧（Dropbox の names.txt。非公開。トーク名だけで、会話の中身は入れない）
+local function writeSaved(R)
+  hs.fs.mkdir(DEBUG_DIR)
+  local t = { "# 今日書き出したトーク（普段のトークの一覧の上から）",
+              "time: " .. os.date("%Y-%m-%d %H:%M:%S"), "version: " .. VERSION,
+              "# 非公開（Dropbox）。トーク名だけで、会話の中身は入れていない",
+              string.format("# 一覧の上から %d 件を開いた（上限 %d 件）%s", R.rowsTried or #R.list, LIST_TOP,
+                R.stopped and ("。中断: " .. R.stopped) or ""), "" }
+  for _, e in ipairs(R.list) do
+    t[#t + 1] = string.format("%d. %s\t%s", e.n, tostring(e.name):gsub("[%c]", " "), e.how)
   end
+  local f = io.open(DEBUG_DIR .. "/names.txt", "w")
+  if f then f:write(table.concat(t, "\n") .. "\n"); f:close() end
+end
+
+local function runExport(auto)
+  local app, err, why = prepareApp(not auto)
   if not app then
     log(err)
     if why == "notrunning" then
@@ -2329,7 +2414,7 @@ local function runExport(auto)
     local res = todayResult()
     if not auto or res.failed ~= err then
       hs.alert.show("LINE書き出し中止: " .. err, 6)
-      writeHeartbeat(0, #TARGETS, { "全件: " .. err })
+      writeHeartbeat(0, 1, { "全件: " .. err })
       if auto then res.failed = err; writeResult(res) end   -- 自動実行の「始められない」だけ残す
       writeReport("始められない: " .. err, {})
       runSync()
@@ -2343,52 +2428,22 @@ local function runExport(auto)
     return "busy", "手が動いていた"
   end
   if DONE.day ~= today() then DONE = { day = today(), ok = {} } end
-  local okN, ngN, ngLines, stopped, results = 0, 0, {}, nil, {}
-  -- 書き出しの前に今のトーク名を集めて names.txt に書く（1日1回。今日まだ書き出して
-  -- いないものがある時だけ）
-  local left = false
-  for _, t in ipairs(TARGETS) do if not (auto and DONE.ok[targetName(t)]) then left = true end end
-  if left and namesStale() then
-    local okn, r = pcall(prepareNames, app)
-    if not okn and type(r) == "table" and r.abort then
-      stopped = r.abort .. "（今のトーク名を集めている時に中断）"
-      results[#results + 1] = { name = "（今のトーク名を集める）", ok = false,
-                                e = { stage = "中断", msg = r.abort } }
-      for _, t in ipairs(TARGETS) do if auto and DONE.ok[targetName(t)] then okN = okN + 1 end end
-    elseif not okn then
-      log("今のトーク名を集められなかった: " .. tidy(type(r) == "table" and r.blocked or r))
-    end
-  end
-  for i, t in ipairs(TARGETS) do
-    if stopped then break end
-    local name = targetName(t)
-    if auto and DONE.ok[name] then
-      okN = okN + 1; log("済み " .. name .. "（今日の前の実行で書き出し済み）")
-      goto continue
-    end
-    -- 1件の想定外エラーで残りを止めず、heartbeat も必ず書く
-    local trace = {}
-    local okc, ok, e = pcall(exportOne, app, name, { trace = trace })
-    if not okc then
-      if type(ok) == "table" and ok.abort then
-        stopped = ok.abort .. "（" .. i .. "/" .. #TARGETS .. " 件目で中断）"
-        results[#results + 1] = { name = name, ok = false, trace = trace,
-                                  e = { stage = "中断", msg = ok.abort } }
-        break
-      end
-      ok, e = false, { stage = "内部エラー", msg = tidy(ok) }
-    end
-    if ok then
-      okN = okN + 1; DONE.ok[name] = true; log("OK  " .. name .. " → " .. tidy(e))
-      results[#results + 1] = { name = name, ok = true, trace = trace, note = "→ " .. (e:match("[^/]+$") or e) }
+  -- 一覧の上から順に書き出す。今日の前の実行で保存したトーク（DONE.ok。保存名）は
+  -- 保存し直さない（中断の後のやり直し・新しい版でのやり直し）
+  local R = { okN = 0, ngN = 0, ngLines = {}, results = {}, list = {}, saved = DONE.ok }
+  local okl, el = pcall(exportList, app, R)
+  if not okl then
+    if type(el) == "table" and el.abort then
+      R.stopped = el.abort .. "（一覧を読んでいる時に中断）"
     else
-      ngN = ngN + 1; log("NG  " .. name .. "  " .. describe(e, true))
-      ngLines[#ngLines + 1] = name .. ": " .. describe(e)
-      results[#results + 1] = { name = name, ok = false, trace = trace, e = e }
+      R.ngN = R.ngN + 1
+      R.ngLines[#R.ngLines + 1] = "一覧: [内部エラー] " .. tidy(type(el) == "table" and (el.blocked or el.abort) or el)
+      R.results[#R.results + 1] = { name = "一覧", ok = false,
+                                    e = { stage = "内部エラー", msg = tidy(type(el) == "table" and el.blocked or el) } }
     end
-    wait(0.8)
-    ::continue::
   end
+  local okN, ngN, ngLines, stopped, results = R.okN, R.ngN, R.ngLines, R.stopped, R.results
+  writeSaved(R)
   endRun()
   if stopped then log("中断: " .. stopped) end
 
@@ -2508,18 +2563,20 @@ function M.help()
   print(table.concat({
     "=== LINE書き出し の使い方（" .. VERSION .. "）===",
     "  ふだんは何もしなくてよい。毎日 " .. RUN_AT .. " 以降、Mac を " .. IDLE_REQUIRED // 60 ..
-      " 分以上触っていない時（画面ロック中は除く）に自動で書き出して push する。",
+      " 分以上触っていない時（画面ロック中は除く）に、普段のトークの一覧の上から " .. LIST_TOP ..
+      " 件を自動で書き出して push する。",
+    "  今日書き出したトークの一覧は " .. DEBUG_SHOW .. "/names.txt（非公開）。",
     "  1回の実行は " .. RUN_LIMIT_MIN .. " 分まで（固まったら止める）。",
     "  失敗したら撮影画像と診断（伏せ字）を " .. DEBUG_SHOW .. " に残す。",
     "  直した版は GitHub から自動で取り込む（" .. UPDATE_EVERY // 60 .. " 分ごと。自動実行の後にも）。",
     "",
     "  __LINE_EXPORT.status()        今の状態と、自動実行が走らない理由",
-    "  __LINE_EXPORT.check(\"Berry\")  1件を保存ダイアログで保存名を確かめるところまで試す（保存しない）",
-    "  __LINE_EXPORT.one(\"Berry\")    1件だけ本当に書き出して push",
+    "  __LINE_EXPORT.check(\"Berry\")  名前で1件を、保存ダイアログで保存名を確かめるところまで試す（保存しない）",
+    "  __LINE_EXPORT.one(\"Berry\")    名前で1件だけ本当に書き出して push",
     "  __LINE_EXPORT.diag()          画面の読み取り診断（⌘⌥⌃K と同じ。何も押さない）",
-    "  __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ。TARGETS に貼れる形式）",
+    "  __LINE_EXPORT.names()         トーク名の一覧（⌘⌥⌃J と同じ）",
     "  __LINE_EXPORT.update()        今すぐ最新の版にする（ふだんは自動更新に任せてよい）",
-    "  ⌘⌥⌃L 全件を今すぐ書き出す（⇧ 版でも可）",
+    "  ⌘⌥⌃L 一覧の上から " .. LIST_TOP .. " 件を今すぐ書き出す（⇧ 版でも可）",
     "  止めたいとき: マウスを動かすかキーを押す",
     "  status / check / one / diag の画面の文字は伏せ字（TARGETS の名前と LINE の決まった表示以外は ■n字）",
   }, "\n"))
@@ -2816,7 +2873,7 @@ M._t = {
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
   statusLines = statusLines, readResult = readResult, selfUpdate = selfUpdate,
-  sleptThrough = sleptThrough, notePower = notePower, harvestNames = harvestNames,
+  sleptThrough = sleptThrough, notePower = notePower,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,
   VERSION = VERSION,
 }
@@ -2838,6 +2895,6 @@ if not screenRecordingOK() then
   log("warn: Hammerspoon に「画面収録」が許可されていない。画面を読むので必須" ..
       "（システム設定 → プライバシーとセキュリティ → 画面とシステムオーディオ録音）")
 end
-log(string.format("読込完了 %s / 対象%d件 / %s以降 離席中に自動実行 / 使い方: __LINE_EXPORT.help()",
-  VERSION, #TARGETS, RUN_AT))
+log(string.format("読込完了 %s / 一覧の上から%d件 / %s以降 離席中に自動実行 / 使い方: __LINE_EXPORT.help()",
+  VERSION, LIST_TOP, RUN_AT))
 return M
