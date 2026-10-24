@@ -84,6 +84,9 @@ local L = {
   -- 上へ SHIFT_MAX より大きい・下へ SHIFT_UP より大きいずれは測り違いとみなす
   SHIFT_MAX       = 80,
   SHIFT_UP        = 12,
+  NAME_LINES      = 3,    -- 名前を集める時、点単位で一覧が動かなければ行単位でこの量ずつ送る
+  NAME_LINES_MAX  = 48,   -- 行単位で新しい名前が出ない時に増やす上限
+  NAME_LINES_TOP  = 3000, -- 一番上へ戻す時の行単位の量
   -- 今のトーク名を集める時に読む一覧のページ数の上限（1ページ＝一覧の高さ分）
   NAME_PAGES      = 15,
 }
@@ -1100,6 +1103,36 @@ local function headerSeen(hrow)
   return string.format("ヘッダ行（y=%.0f）: %s", hrow[1].y, table.concat(t, " "))
 end
 
+-- TARGETS を開いて、保存名やヘッダが合わずに止めた時の本当の名前の控え。
+-- 非公開の Dropbox（names_seen.txt）にだけ書く（診断ファイルとコンソールは伏せ字のまま）。
+-- 名前が変わったトークの TARGETS を、人に聞かずに直すため。トーク名だけで、
+-- 会話の中身は入れない
+local SEEN_PATH, SEEN_KEEP = DEBUG_DIR .. "/names_seen.txt", 200
+local function noteSeen(target, kind, name)
+  pcall(function()
+    name = tostring(name or ""):gsub("[%c]", " ")
+    if name:match("^%s*$") then return end
+    hs.fs.mkdir(DEBUG_DIR)
+    local lines = {}
+    for l in (readAll(SEEN_PATH) or ""):gmatch("[^\n]+") do
+      if not l:match("^#") then lines[#lines + 1] = l end
+    end
+    lines[#lines + 1] = os.date("%Y-%m-%d %H:%M:%S") .. "\t" .. target .. "\t" .. kind .. "\t" .. name
+    local f = io.open(SEEN_PATH, "w")
+    if not f then return end
+    f:write("# TARGETS を開いた時に、保存名やヘッダが合わずに止めた本当の名前（新しいものが下）\n" ..
+            "# 非公開（Dropbox）。トーク名だけで、会話の中身は入れていない\n" ..
+            "# 時刻\tTARGETS の名前\t見えた所\t見えた名前\n")
+    f:write(table.concat(lines, "\n", math.max(1, #lines - SEEN_KEEP + 1)) .. "\n")
+    f:close()
+  end)
+end
+local function rawHeader(hrow)
+  local t = {}
+  for _, it in ipairs(hrow or {}) do t[#t + 1] = it.text end
+  return table.concat(t, " ")
+end
+
 -- 押した行のトークが開いたか、ヘッダを読んで確かめる。開くのに時間が
 -- かかることがあるので、4秒までは読み直す。
 -- 戻り値: ヘッダのトーク名（OCR の1件）/ nil, "ocr" か "mismatch", 撮影, 詳細
@@ -1119,7 +1152,10 @@ local function confirmHeader(ctx, win, ff, paneX, row, top)
     end
     local hdr = headerMatches(hrow, ctx.tn, row, top)
     if hdr then return hdr end
-    if now() >= limit then return nil, "mismatch", cap, headerSeen(hrow) end
+    if now() >= limit then
+      noteSeen(ctx.name, "ヘッダ", rawHeader(hrow))
+      return nil, "mismatch", cap, headerSeen(hrow)
+    end
     wait(0.5)
   end
 end
@@ -1222,12 +1258,12 @@ end
 -- 一覧の上でホイールを回す（正は上へ、負は下へ）。押す時と同じく、LINE が前面で
 -- その位置に他の物が重なっていない時だけ。量は整数で渡す（Hammerspoon は小数の
 -- 量を 0 として扱い、一覧が動かない）
-local function scrollList(x, y, amount)
+local function scrollList(x, y, amount, unit)
   guard()
   if not ensureFront() then blocked(FRONT_LOST) end
   clearCover(x, y)
   hs.mouse.absolutePosition(hs.geometry.point(x, y))
-  hs.eventtap.scrollWheel({ 0, math.floor(amount + 0.5) }, {}, "pixel")
+  hs.eventtap.scrollWheel({ 0, math.floor(amount + 0.5) }, {}, unit or "pixel")
   synthesized(); wait(0.6)
 end
 
@@ -1265,14 +1301,20 @@ local function harvestNames(win)
   local top = ctx.ff.y + ctx.ff.h
   local mx, my = (ctx.ff.x + paneX) / 2, (top + f.y + f.h) / 2
   local page = math.max(100, f.y + f.h - top - 90)      -- 1行ぶん重ねて送る
-  scrollList(mx, my, 20000)                              -- 一番上から読む
+  -- 送り方: まず点（pixel）単位。一覧が動かなければ行（line）単位に替える
+  -- （実機 10/24: pixel で送っても一覧が動かず、最初の 14 件しか集められなかった）。
+  -- 行単位の1行の量はアプリで違うので、少しずつ送り、新しい名前が出ない時だけ増やす
+  local unit, step, moved = "pixel", page, false
+  local function toTop() scrollList(mx, my, 20000, "pixel"); scrollList(mx, my, L.NAME_LINES_TOP, "line") end
+  toTop()                                                -- 一番上から読む
   local list, seen, how = {}, {}, L.NAME_PAGES .. " ページで打ち切り（一覧の途中まで）"
-  for _ = 1, L.NAME_PAGES do
+  local prevKey
+  for _ = 1, L.NAME_PAGES * 3 do
     items = readList(ctx, win, field, ffAX)
     if not items then how = "OCR が途中で止まった（一覧の途中まで）"; break end
     local cells = rowsByAX(win, paneX, ctx.ff.y + ctx.ff.h, ctx.dy)
-    local added = 0
-    for _, it in ipairs(rowNames(items, ctx.ff, paneX)) do
+    local rows, added = rowNames(items, ctx.ff, paneX), 0
+    for _, it in ipairs(rows) do
       local raw, exact = it.text, false
       for _, c in ipairs(cells) do
         if c.raw and inside(it, c.f) and sameText(c.n, it.n) then raw, exact = c.raw, true end
@@ -1283,13 +1325,25 @@ local function harvestNames(win)
         list[#list + 1] = { raw = raw, n = n, exact = exact }
       end
     end
-    if added == 0 then
-      how = #list == 0 and "名前を読めなかった（一覧の行の時刻が見つからない）" or "一覧の終わりまで読んだ"
-      break
+    if #list == 0 then how = "名前を読めなかった（一覧の行の時刻が見つからない）"; break end
+    -- 一覧が動いたかは、一番上に見えている行（名前と高さ）で見る
+    local key = rows[1] and (rows[1].n .. "@" .. math.floor(rows[1].y / 4 + 0.5)) or ""
+    if prevKey and key == prevKey then
+      if unit == "pixel" and not moved then
+        unit, step = "line", L.NAME_LINES                -- pixel が効かない: 行単位で送り直す
+      else
+        how = moved and ("一覧の終わりまで読んだ（" .. (unit == "line" and "行" or "点") .. "単位で送った）")
+                    or "一覧を下へ送れなかった（点・行単位とも一覧が動かない。最初の画面の分だけ）"
+        break
+      end
+    elseif prevKey then
+      moved = true
+      if unit == "line" and added == 0 then step = math.min(step * 2, L.NAME_LINES_MAX) end
     end
-    scrollList(mx, my, -page)
+    prevKey = key
+    scrollList(mx, my, -step, unit)
   end
-  scrollList(mx, my, 20000)                              -- 一番上に戻しておく
+  toTop()                                                -- 一番上に戻しておく
   return list, how
 end
 
@@ -1614,6 +1668,7 @@ local function saveAndMove(ctx, app, st)
   end
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
   if not nameMatches(cur, ctx.name) then
+    noteSeen(ctx.name, "保存名", cur)
     local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
     e.otherChat = true                            -- 別のトークだった（次の候補があれば試す）
     return nil, e
@@ -1628,6 +1683,7 @@ local function saveAndMove(ctx, app, st)
     local others = false
     for k in pairs(ctx.maybe) do if k ~= cur then others = true end end
     if targetHasEmoji or ctx.more or others then
+      noteSeen(ctx.name, "保存名（絵文字・記号だけ違う）", cur)
       local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur) ..
         (targetHasEmoji and "（絵文字・記号が TARGETS と違う）"
                         or "（絵文字・記号だけ違うトークが他にもありうる。TARGETS に絵文字まで書くと決められる）"))
@@ -2794,7 +2850,7 @@ M._t = {
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
   statusLines = statusLines, readResult = readResult, selfUpdate = selfUpdate,
-  sleptThrough = sleptThrough, notePower = notePower,
+  sleptThrough = sleptThrough, notePower = notePower, harvestNames = harvestNames, noteSeen = noteSeen,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,
   VERSION = VERSION,
 }
