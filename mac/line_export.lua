@@ -114,7 +114,7 @@ local function log(s) print(os.date("%H:%M:%S ") .. "[line-dump] " .. s) end
 -- 使う拡張は読み込み時に読んでおく（Hammerspoon は初めて触った時に読み込むので、
 -- 実行の途中で読み込みに時間を取られないように）
 for _, ext in ipairs({ "axuielement", "eventtap", "pasteboard", "application", "screen", "mouse",
-                       "geometry", "caffeinate", "camera", "host", "fs", "timer", "alert" }) do
+                       "geometry", "caffeinate", "camera", "host", "fs", "timer", "alert", "battery" }) do
   local _ = hs[ext]
 end
 
@@ -1937,6 +1937,59 @@ local function writeState(s)
   if f then f:write(s .. "\n"); f:close() end
 end
 
+-- Mac が眠った・起きた・ロックした時刻（この Mac だけの記録。共有しない）。
+-- 07:00 に走らなかった日に「眠っていたのか・ロックされていたのか」を、人に
+-- 聞かずに診断ファイルで分かるようにする（眠っている間は何も動けない）。
+local POWER_LOG  = REPO .. "/mac/.power_log"
+local POWER_KEEP = 60                             -- 残す行数（古いものから消す）
+local POWER_WORDS = { sleep = "眠った", wake = "起きた", lock = "ロック", unlock = "ロック解除",
+                      off = "画面が消えた", on = "画面がついた", poweroff = "電源を切る・ログアウト",
+                      load = "読み込み" }
+local function powerSource()
+  local ok, s = pcall(function() return hs.battery.powerSource() end)
+  if not ok or type(s) ~= "string" then return nil end
+  return (s == "Battery Power" and "電池") or (s == "AC Power" and "電源") or s
+end
+local function notePower(ev)
+  local lines = {}
+  for l in (readAll(POWER_LOG) or ""):gmatch("[^\n]+") do lines[#lines + 1] = l end
+  lines[#lines + 1] = os.date("%Y-%m-%d %H:%M:%S") .. " " .. ev .. " " .. (powerSource() or "-")
+  local f = io.open(POWER_LOG, "w")
+  if f then f:write(table.concat(lines, "\n", math.max(1, #lines - POWER_KEEP + 1)) .. "\n"); f:close() end
+end
+local function powerEvents()
+  local t = {}
+  for l in (readAll(POWER_LOG) or ""):gmatch("[^\n]+") do
+    local y, mo, d, h, mi, s, ev, src = l:match("^(%d+)-(%d+)-(%d+) (%d+):(%d+):(%d+) (%S+) ?(%S*)")
+    if y then
+      t[#t + 1] = { ev = ev, src = src, at = os.time({ year = tonumber(y), month = tonumber(mo),
+        day = tonumber(d), hour = tonumber(h), min = tonumber(mi), sec = tonumber(s) }) }
+    end
+  end
+  return t
+end
+local function clock(at)
+  return os.date(os.date("%Y%m%d", at) == os.date("%Y%m%d") and "%H:%M" or "%m/%d %H:%M", at)
+end
+-- 今日の RUN_AT をまたいで眠っていたなら、その間（"00:41〜09:52"）を返す
+local function sleptThrough()
+  local hh, mm = RUN_AT:match("^(%d+):(%d+)$")
+  local t = os.date("*t")
+  local runAt = os.time({ year = t.year, month = t.month, day = t.day, hour = tonumber(hh), min = tonumber(mm) })
+  local evs = powerEvents()
+  for i = #evs, 1, -1 do
+    if evs[i].ev == "sleep" and evs[i].at <= runAt then
+      for j = i + 1, #evs do
+        if evs[j].ev == "wake" then
+          return evs[j].at > runAt and (clock(evs[i].at) .. "〜" .. clock(evs[j].at)) or nil
+        end
+      end
+      return nil
+    end
+  end
+  return nil
+end
+
 -- 今日の結果。読み込み直しても、書き出せたトークを飛ばして続きからやれるように。
 --   day / version（その結果を出した版）/ ng（最後まで回った時の失敗数）/
 --   ok=（書き出せたトーク）/ failed=（始められなかった理由）/ stopped=（中断の理由）
@@ -2020,7 +2073,8 @@ local function gitBranch()
 end
 local function displaySleepMin()
   local out = hs.execute("/usr/bin/pmset -g 2>/dev/null")
-  return tonumber((out or ""):match("displaysleep%s+(%d+)"))
+  return tonumber((out or ""):match("displaysleep%s+(%d+)")),
+         tonumber(("\n" .. (out or "")):match("\n%s*sleep%s+(%d+)"))   -- Mac 本体が眠るまで（分）
 end
 
 local function statusLines()
@@ -2064,7 +2118,7 @@ local function statusLines()
   add(nil, string.format("今の無操作時間: %.0f 秒", idleSeconds()))
   local locked = screenLocked()
   add(not locked, "画面ロック: " .. (locked and "中（ロック中は自動実行しない）" or "なし"))
-  local ds = displaySleepMin()
+  local ds, ss = displaySleepMin()
   if ds then
     if ds > 0 and ds * 60 <= IDLE_REQUIRED then
       add(false, "画面が " .. ds .. " 分で消える設定。" .. IDLE_REQUIRED // 60 ..
@@ -2073,6 +2127,20 @@ local function statusLines()
       add(true, "画面が消えるまで: " .. (ds == 0 and "消えない設定" or (ds .. " 分")))
     end
   end
+  if ss then add(nil, "Mac が眠るまで: " .. (ss == 0 and "眠らない設定" or (ss .. " 分"))) end
+  local src = powerSource()
+  if src then add(nil, "電源: " .. src) end
+  local slept = sleptThrough()
+  if slept and not (day == today() and aborts == nil) then
+    add(false, RUN_AT .. " は Mac が眠っていた（" .. slept .. "）。眠っている間は何も動けない。" ..
+      "起きている間に " .. IDLE_REQUIRED // 60 .. " 分触らなければ始める")
+  end
+  local evs, recent = powerEvents(), {}
+  for i = #evs, math.max(1, #evs - 7), -1 do
+    recent[#recent + 1] = clock(evs[i].at) .. " " .. (POWER_WORDS[evs[i].ev] or evs[i].ev) ..
+      ((evs[i].src ~= "" and evs[i].src ~= "-") and ("（" .. evs[i].src .. "）") or "")
+  end
+  if #recent > 0 then add(nil, "最近の眠り・ロック（新しい順）: " .. table.concat(recent, " / ")) end
   local busy = watchedScreen()
   if busy then add(false, "見送りの理由: " .. busy) end
   add(nil, "撮影画像と診断の置き場: " .. DEBUG_SHOW)
@@ -2606,12 +2674,15 @@ local function maybeRun()
     end
   end
   if why then
-    -- 昼になっても走れていない日は、理由を heartbeat に残す（GitHub から見て
-    -- 走らなかった理由が分かるように。今日の heartbeat がまだ無い時だけ＝1日1回）
-    if t.hour >= 12 and stateDay ~= day and not heartbeatToday() then
+    -- 昼になっても走れていない日と、RUN_AT の間 Mac が眠っていた日は、理由を
+    -- heartbeat に残す（GitHub から見て走らなかった理由が分かるように。
+    -- 今日の heartbeat がまだ無い時だけ＝1日1回）
+    local slept = stateDay ~= day and sleptThrough()
+    if (t.hour >= 12 or slept) and stateDay ~= day and not heartbeatToday() then
+      local note = "見送り中: " .. why .. (slept and ("（" .. RUN_AT .. " は Mac が眠っていた: " .. slept .. "）") or "")
       checked(why)                                -- 診断ファイルの「最後の確認」にこの理由を出す
-      writeHeartbeat(0, 0, {}, "見送り中: " .. why)
-      writeReport("見送り中: " .. why, {})
+      writeHeartbeat(0, 0, {}, note)
+      writeReport(note, {})
       runSync()
     end
     return checked(why)
@@ -2672,8 +2743,15 @@ end
 
 M.timer = hs.timer.doEvery(CHECK_EVERY, maybeRun)
 if AUTO_UPDATE then M.updater = hs.timer.doEvery(UPDATE_EVERY, function() selfUpdate("定期確認") end) end
+local POWER_EVENTS = { systemWillSleep = "sleep", systemDidWake = "wake", screensDidLock = "lock",
+                       screensDidUnlock = "unlock", screensDidSleep = "off", screensDidWake = "on",
+                       systemWillPowerOff = "poweroff" }
+pcall(notePower, "load")
 M.waker = hs.caffeinate.watcher.new(function(ev)
   local w = hs.caffeinate.watcher
+  for k, name in pairs(POWER_EVENTS) do
+    if w[k] ~= nil and ev == w[k] then pcall(notePower, name) end
+  end
   if ev == w.systemDidWake or ev == w.screensDidUnlock
      or ev == w.sessionDidBecomeActive then
     -- 復帰直後は落ち着くまで少し待つ（タイマーは M に持たせる。持たないと
@@ -2697,6 +2775,7 @@ M._t = {
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
   statusLines = statusLines, readResult = readResult, selfUpdate = selfUpdate,
+  sleptThrough = sleptThrough, notePower = notePower,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,
   VERSION = VERSION,
 }
