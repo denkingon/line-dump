@@ -17,6 +17,9 @@ local ROOT = run("mktemp -d"):gsub("%s+$", "")
 local ENV = {
   HOME = ROOT .. "/home", LINE_DUMP_REPO = ROOT .. "/repo",
   LINE_DUMP_RAW_DIR = ROOT .. "/out", TMPDIR = ROOT .. "/tmp",
+  -- 眠り・「より前」の試験は 07:00 を境にして作ってある（境の時刻に依らない仕組みの
+  -- 試験）。本物の既定（00:00）は「開始の時刻」の試験で確かめる
+  LINE_DUMP_RUN_AT = "07:00",
 }
 local realgetenv = os.getenv
 os.getenv = function(k) return ENV[k] or realgetenv(k) end
@@ -3482,6 +3485,44 @@ test("状態: 書き出した後の status.txt にもトーク名を入れない
   local st = status()
   check(st:find("why: 定期", 1, true) and st:find("今日の書き出し: 済み", 1, true), "書き出し後の状態:\n" .. st)
   for _, n in ipairs({ "Berry", "Cherry", "Dango" }) do check(not st:find(n, 1, true), n .. " を入れない:\n" .. st) end
+end)
+
+-- ===================== 開始の時刻（2026-10-25: 07:00 → 00:00）=====================
+-- 実機 10/25: 03:03 に離れて 03:23 にロック、03:52 に離れて 03:57 にロック。
+-- 07:00 より前だったので走れず、その後は朝までロックか眠りだった
+local function withDefaultRunAt(fn)
+  local keep = ENV.LINE_DUMP_RUN_AT
+  ENV.LINE_DUMP_RUN_AT = nil
+  local ok, err = pcall(fn)
+  ENV.LINE_DUMP_RUN_AT = keep
+  if not ok then error(err, 0) end
+end
+
+test("開始の時刻: 既定は 00:00。夜中に離れてロックされるまでの間に走る", function()
+  withDefaultRunAt(function()
+    reset({ chats = chats({ "Berry", "Cherry Pie" }) })
+    local M = load()
+    atClock(3, 6, function() M._t.tick() end)
+    check(W.saved, "03:06 の離席で書き出した")
+    check(M.lastCheck and M.lastCheck.why:find("自動実行: 最後まで", 1, true), "最後の確認: " .. tostring(M.lastCheck and M.lastCheck.why))
+    check(heartbeat():find("last_run: ", 1, true) and W.synced >= 1, "heartbeat を書いて push した")
+    local st = status()
+    check(st:find("自動実行の条件: 毎日 00:00 以降", 1, true), "状態に条件:\n" .. st)
+  end)
+end)
+
+test("開始の時刻: 既定（00:00）でも、使用中・ロック中は始めない", function()
+  withDefaultRunAt(function()
+    reset({ chats = chats({ "Berry" }) })
+    local M = load()
+    W.lastHID = T - 30
+    atClock(0, 30, function() M._t.tick() end)
+    check(not W.saved and #W.clicks == 0, "使用中は始めない")
+    W.lastHID = T - 999; W.knobs.locked = true
+    atClock(0, 40, function() M._t.tick() end)
+    check(not W.saved and #W.clicks == 0, "ロック中は始めない")
+    check(M.lastCheck.why == "画面がロック中", "理由: " .. tostring(M.lastCheck.why))
+  end)
 end)
 
 run("rm -rf " .. sh(ROOT))
