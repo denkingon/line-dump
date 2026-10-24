@@ -38,7 +38,11 @@ class TestSyncSh(unittest.TestCase):
                         GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
                         GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com",
                         LINE_DUMP_REPO=str(self.work), LINE_DUMP_RAW_DIR=str(self.raw),
-                        LINE_DUMP_PYTHON=shutil.which("python3") or "python3")
+                        LINE_DUMP_PYTHON=shutil.which("python3") or "python3",
+                        # 本物の GitHub には決してつながない（origin を GitHub の URL にする
+                        # テストで sync.sh の歯止めが効かなかった時に、試験の commit が本物に
+                        # push されたことがある）。ローカルの bare origin だけ使える
+                        GIT_ALLOW_PROTOCOL="file")
         self.git("init", "-q", "--bare", "-b", "main", str(self.origin), cwd=self.tmp)
         self.work.mkdir()
         for rel in ("scripts/ingest.py", "scripts/line_parser.py", "mac/sync.sh", ".gitignore"):

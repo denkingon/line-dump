@@ -444,6 +444,26 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(
             (ingest.CHATS_DIR / "田中.txt").read_text(encoding="utf-8"), one)
 
+    def test_renamed_sender_old_snapshot_is_not_a_homonym(self):
+        # 実機 10/24: 送り主の表示名が変わると過去の行も新しい名前で書き出される。
+        # 古いスナップショットを後から取り込み直しても「(2)」を作らず、正本も変えない
+        def body(name_of_b):
+            lines = ["2026/07/12(日)"]
+            for i in range(60):
+                who = name_of_b if i % 20 == 0 else "田中"
+                lines.append(f"10:{i:02d}\t{who}\tメッセージ{i}")
+            return "\n".join(lines) + "\n"
+        newer = _export("グループ", body("鈴木（新しい名前）") + "11:00\t田中\t新着\n", group=True)
+        older = _export("グループ", body("鈴木"), group=True)
+        _run(str(self._incoming("new.txt", newer, mtime=2000)))
+        rc, out, err = _run(str(self._incoming("old.txt", older, mtime=1000)))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("unchanged=1", out)
+        self.assertIn("旧版", out)
+        self.assertNotIn("同名の別トーク", err)
+        self.assertFalse((ingest.CHATS_DIR / "グループ (2).txt").exists())
+        self.assertEqual((ingest.CHATS_DIR / "グループ.txt").read_text(encoding="utf-8"), newer)
+
     def test_sanitize_collision_gets_separate_files(self):
         a = _export("A/B", "2026/07/12(日)\n10:00\tA\tスラッシュの方\n")
         b = _export("A:B", "2026/07/12(日)\n10:00\tB\tコロンの方\n")
