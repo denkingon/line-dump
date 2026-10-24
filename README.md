@@ -11,7 +11,7 @@ LINE のトーク履歴（txt）を毎日 Cowork / Claude に届けるパイプ�
 【経路0: Mac 自動書き出し ★本命・操作ゼロ】
 毎日 07:00 以降、Mac を3分触っていない時（画面ロック中は除く）に
             Hammerspoon が Mac 版 LINE を操作（v4.1: 画面を OCR で読んでから押す）
-  → 一覧に見えるトークはそのまま・見えなければ検索して開く → ⋮ →「トークを保存」
+  → 普段のトークの一覧の上から 20 件を順に開く → ⋮ →「トークを保存」
   → [LINE]<トーク名>_YYYYMMDD.txt
   → mac/sync.sh: ingest.py → commit → push
               chats/<トーク名>.txt が最新に

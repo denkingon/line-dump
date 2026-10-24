@@ -104,7 +104,8 @@ local function results()
 end
 
 local function menuItems()
-  return W.knobs.menuItems or { "通知オフ", "トークを保存", "トーク履歴を削除", "退会" }
+  local c = W.open and chat(W.open)                 -- Keep メモ などは「トークを保存」が無い
+  return (c and c.menuItems) or W.knobs.menuItems or { "通知オフ", "トークを保存", "トーク履歴を削除", "退会" }
 end
 
 -- 画面に見えている文字（論理座標）。screen=true は画面を撮った時（別窓の
@@ -192,6 +193,9 @@ local function openSheet()
   W.sheet = { value = W.knobs.defaultName or ("[LINE]" .. W.open .. ".txt"), cursorEnd = false }
   W.focus = "sheet"
   if W.knobs.frontLostOnSheet then W.knobs.frontIsOther = true end
+  -- k 回目の保存ダイアログが出た時だけ、別のアプリが前に出る（次に前に出し直すと戻る）
+  W.sheetsOpened = (W.sheetsOpened or 0) + 1
+  if W.knobs.frontLostOnSheetN == W.sheetsOpened then W.knobs.frontIsOther = true; W.frontLostAt = W.sheetsOpened end
 end
 
 local function doSave(p)
@@ -258,9 +262,16 @@ local function click(pt)
   for i, c in ipairs(results()) do
     if L.rowY(i) >= L.listTop and math.abs(pt.y - L.rowY(i)) < 28
        and pt.x > L.field.x - 60 and pt.x < L.field.x + L.field.w + 10 then
-      W.open = opened(c); W.openedAt = T
       W.openLog[#W.openLog + 1] = c.name
+      if c.noOpen then return end                  -- 押しても開かない行
+      W.open = c.opens or opened(c); W.openedAt = T  -- opens: 押すと別のトークが開く行
       W.focus = "input"
+      -- 新着で別のトークが一覧の一番上に来る（reorderAtClick 回目に押した後）
+      if W.knobs.reorderAtClick == W.clickN then
+        for k, x in ipairs(W.chats) do
+          if x.name == W.knobs.reorderName then table.remove(W.chats, k); table.insert(W.chats, 1, x); break end
+        end
+      end
       return
     end
   end
@@ -439,6 +450,10 @@ local appObj = {
   mainWindow = function() return W.win.exists and winObj or nil end,
   isHidden = function() return W.knobs.appHidden == true end,
   activate = function()
+    if W.frontLostAt then                            -- 1回目の出し直しは効かず、2回目で戻る
+      W.frontTries = (W.frontTries or 0) + 1
+      if W.frontTries >= 2 then W.knobs.frontIsOther = nil; W.frontLostAt = nil end
+    end
     if W.knobs.userActsAtFirstActivate and not W.actDone then
       W.actDone = true; W.pendingUser = "key"; W.knobs.frontIsOther = true   -- 人が戻って別のアプリを押した
     end
@@ -607,6 +622,8 @@ hs = {
       -- 本物は量を整数に直して読む（小数は 0 になり、動かない）
       local amount = math.tointeger(off[2])
       if not amount then W.fractionalScroll = true; return end
+      -- 最初に下へ送った時に、いくつ開いていたか（見えている最後の行の番号を知るため）
+      if off[2] < 0 and not W.opensAtFirstScroll and #W.openLog > 0 then W.opensAtFirstScroll = #W.openLog end
       if W.sheet then return end                     -- シートが出ている間は一覧も動かない
       -- 点（pixel）単位・行（line）単位のどちらが効くかはアプリしだい（実機 10/24: pixel で動かない）
       if (unit or "line") == "pixel" and W.knobs.pixelScrollIgnored then return end
@@ -740,7 +757,9 @@ local function check(cond, msg)
     realprint("  NG: [" .. current .. "] " .. msg)
   end
 end
+local ONLY = realgetenv("LINE_TEST_ONLY")      -- 名前にこの文字を含むテストだけ流す
 local function test(name, fn)
+  if ONLY and not name:find(ONLY, 1, true) then return end
   current = name
   local ok, err = pcall(fn)
   if not ok then
@@ -1673,179 +1692,395 @@ test("OCR が動かなければ「OCR」の段で止める（別トーク扱い�
   safe()
 end)
 
--- ===================== 今のトーク名を集める =====================
+-- ===================== 一覧の上から順に書き出す =====================
 local function namesTxt() return readfile(DEBUG .. "/names.txt") or "" end
-local function withTargets(extra)
-  local M = load()
+local function outFiles()                          -- OUT_DIR の今日付きの書き出し（名前の順）
+  local t = {}
+  for _, n in ipairs(lsdir(OUT)) do if n:find("_" .. TODAY .. "%.txt$") then t[#t + 1] = n end end
+  table.sort(t)
+  return t
+end
+local function has(name) return exists(OUT .. "/[LINE]" .. name .. "_" .. TODAY .. ".txt") end
+local function numbered(n, preview)
   local list = {}
-  for _, c in ipairs(extra or {}) do list[#list + 1] = c end
-  W.chats = list
-  return M
+  for i = 1, n do list[#list + 1] = { name = "トーク" .. i .. "番", preview = preview and ("秘密のメッセージ" .. i) or nil } end
+  return list
 end
 
-test("1日1回、書き出しの前に一覧を上から下まで読んで今のトーク名を集め、names.txt に名前だけを書く", function()
-  reset()
-  local list = {}
-  for i = 1, 40 do list[#list + 1] = { name = "トーク" .. i .. "番", preview = "秘密のメッセージ" .. i } end
-  list[#list + 1] = { name = "Berry", preview = "秘密のメッセージB" }
-  local M = withTargets(list)
+test("毎日の書き出しは、普段の一覧の上から 20 件を順に開き、LINE の保存名のまま保存する", function()
+  reset({ chats = numbered(30, true) })
+  local M = load()
   W.search = "前の検索"
-  M._t.runExport()
-  local nt = namesTxt()
+  local r = M._t.runExport(true)
+  check(r == "done", "最後まで: " .. tostring(r))
   local all = true
-  for i = 1, 40 do if not nt:find("\nトーク" .. i .. "番\n", 1, true) then all = false end end
-  check(all and nt:find("\nBerry\n", 1, true), "41件とも集めた:\n" .. nt)
-  check(nt:find("一覧の終わりまで読んだ", 1, true), "終わりまで読んだと書く:\n" .. nt)
+  for i = 1, 20 do if not has("トーク" .. i .. "番") then all = false end end
+  check(all and not has("トーク21番") and #outFiles() == 20, "上から 20 件だけ保存した: " .. table.concat(outFiles(), ","))
+  local order = true
+  for i = 1, 20 do if W.openLog[i] ~= "トーク" .. i .. "番" then order = false end end
+  check(order and #W.openLog == 20, "上から順に開いた: " .. table.concat(W.openLog, ","))
+  local hb = heartbeat()
+  check(line(hb, "ok: 20") and line(hb, "ng: 0"), "heartbeat の数:\n" .. hb)
+  check(not hb:find("トーク", 1, true), "heartbeat（公開）にトーク名を書かない:\n" .. hb)
+  local nt = namesTxt()
+  check(nt:find("\n1. [LINE]トーク1番_" .. TODAY .. ".txt\t保存した\n", 1, true)
+        and nt:find("\n20. [LINE]トーク20番_", 1, true), "names.txt に今日保存したトーク:\n" .. nt)
   check(not nt:find("秘密", 1, true), "最後のメッセージは書かない")
-  check(nt:find("Berry → Berry（同じ名前）", 1, true), "TARGETS ごとの近い名前:\n" .. nt)
-  check((W.scrolls or 0) >= 3 and (W.listScroll or 0) == 0, "スクロールして読み、一番上に戻した（" .. tostring(W.scrolls) .. " 回）")
-  check(W.saved and W.saved:find("[LINE]Berry_", 1, true), "Berry は書き出した")
-  local scrolls = W.scrolls
-  M._t.runExport()
-  check(W.scrolls == scrolls, "同じ日の2回目は集め直さない")
+  check(W.synced == 1, "取り込んで push した")
   safe()
 end)
 
-local function fortyOne()
-  local list = {}
-  for i = 1, 40 do list[#list + 1] = { name = "トーク" .. i .. "番", preview = "秘密のメッセージ" .. i } end
-  list[#list + 1] = { name = "Berry", preview = "秘密のメッセージB" }
-  return list
-end
-local function allNames(nt)            -- 行の後ろに「（OCR で読んだ文字）」が付いてもよい
-  for i = 1, 40 do if not nt:find("\nトーク" .. i .. "番[\n\t]") then return false end end
-  return nt:find("\nBerry[\n\t]") ~= nil
-end
-
-test("名前集め: 点単位で一覧が動かない時は、行単位で送って最後まで読む", function()
+test("点単位で一覧が動かなくても、行単位で送って 20 件目まで開く", function()
   for _, scale in ipairs({ 192, 10 }) do           -- 1行で3行ぶん動くアプリ・少ししか動かないアプリ
-    reset({ knobs = { pixelScrollIgnored = true, lineScale = scale } })
-    local M = withTargets(fortyOne())
-    M._t.runExport()
-    local nt = namesTxt()
-    check(allNames(nt), "1行=" .. scale .. "pt でも 41 件とも集めた:\n" .. nt)
-    check(nt:find("一覧の終わりまで読んだ（行単位で送った）", 1, true), "行単位で送ったと書く:\n" .. nt)
-    check((W.listScroll or 0) == 0, "一番上に戻した")
-    check(not nt:find("秘密", 1, true), "最後のメッセージは書かない")
+    reset({ chats = numbered(30), knobs = { pixelScrollIgnored = true, lineScale = scale } })
+    local M = load()
+    M._t.runExport(true)
+    check(#outFiles() == 20 and has("トーク20番") and not has("トーク21番"),
+      "1行=" .. scale .. "pt でも 20 件: " .. table.concat(outFiles(), ","))
+    -- 1行の量を測って一覧の高さの 8 割ずつ送る（1行ずつ少しずつ送り続けない）
+    check((W.scrolls or 0) <= 12, "1行=" .. scale .. "pt: 送った回数 " .. tostring(W.scrolls))
+    safe()
   end
 end)
 
-test("名前集め: 点・行単位とも一覧が動かない時は、終わりまで読んだとは書かない", function()
-  reset({ knobs = { pixelScrollIgnored = true, lineScrollIgnored = true } })
-  local M = withTargets(fortyOne())
-  M._t.runExport()
-  local nt = namesTxt()
-  check(nt:find("一覧を下へ送れなかった", 1, true) and not nt:find("一覧の終わりまで読んだ", 1, true),
-    "送れなかったと書く:\n" .. nt)
-  check(nt:find("\nトーク1番\n", 1, true) and not nt:find("\nトーク40番\n", 1, true), "最初の画面の分だけ")
-end)
-
-test("名前が似ているだけのトーク（Berry と Berry2）は書き出さず、names.txt に候補として書くだけ", function()
-  reset()
-  local M = withTargets({ { name = "直承Jikisho" }, { name = "Berry2" } })
-  M._t.runExport()
-  check(not W.saved, "Berry2 を書き出していない: " .. tostring(W.saved))
-  check(namesTxt():find("Berry → Berry2（0.92）", 1, true), "候補として書く:\n" .. namesTxt())
+test("一覧が 20 件より短ければ、あるだけ保存して終える（送っても動かない＝一覧の終わり）", function()
+  reset({ chats = numbered(5) })
+  local M = load()
+  local r = M._t.runExport(true)
+  check(r == "done" and #outFiles() == 5, "5 件: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ng: 0"), "失敗にしない:\n" .. heartbeat())
   safe()
 end)
 
-test("名前が変わったトーク（il 石川ありがとう → il 石川ありがとう!）も自動では書き出さない（TARGETS を直す）", function()
-  reset()
-  local M = withTargets({ { name = "直承Jikisho" }, { name = "il 石川ありがとう!" } })
-  M._t.runExport()
-  check(not W.saved, "書き出していない")
-  check(namesTxt():find("il 石川ありがとう → il 石川ありがとう!（0.95）", 1, true), "候補:\n" .. namesTxt())
+test("「トークを保存」が無いトーク（Keep メモ など）は飛ばし、失敗に数えない", function()
+  local list = numbered(4)
+  list[2].menuItems = { "通知オフ", "トーク履歴を削除" }
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  check(#outFiles() == 3 and not has("トーク2番"), "残りは保存した: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ng: 0"), "失敗に数えない:\n" .. heartbeat())
+  check(namesTxt():find("2. トーク2番\t⋮ に「トークを保存」が無い", 1, true), "names.txt に飛ばした理由:\n" .. namesTxt())
   safe()
 end)
 
-test("一覧の境目を検索欄の右端で代えた時も、その右に出る時刻を目印に名前を集める（実機: 4 件しか集められなかった）", function()
-  reset({ knobs = { timeDX = 285 } })            -- 境目（検索欄の右端+10 = +270）より右の時刻
-  local list = {}
-  for i = 1, 20 do list[#list + 1] = { name = "トーク" .. i .. "番", noAX = true } end
-  local M = withTargets(list)
-  M._t.runExport()
-  check(namesTxt():find("\nトーク20番\t", 1, true) and namesTxt():find("# 20 件", 1, true), "20 件とも集めた:\n" .. namesTxt())
+test("押しても開かない行は、その行だけ失敗にして次へ進む", function()
+  local list = numbered(4)
+  list[3].noOpen = true
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  check(#outFiles() == 3 and not has("トーク3番"), "ほかは保存した: " .. table.concat(outFiles(), ","))
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("一覧の3番目: [トーク確認]", 1, true), "その行だけ失敗:\n" .. hb)
   safe()
 end)
 
-test("名前の絵文字を OCR が別の字に読んだ行は、OCR で読んだ文字だと分かるように書く", function()
-  reset()
-  local M = withTargets({ { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } })
-  M._t.runExport()
-  check(namesTxt():find("パプリカ》\t（OCR で読んだ文字）", 1, true), "OCR の印:\n" .. namesTxt())
-  check(W.saved and W.saved:find("[LINE]パプリカ🌶️_", 1, true), "パプリカ🌶️ は今までどおり書き出す: " .. tostring(W.saved))
+test("同じに読める名前（パプリカ🍅 と パプリカ🌶️）の行も、それぞれ開いて保存し、送り続けない", function()
+  local function pair()
+    return { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true },
+           { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true }
+  end
+  local a, b = pair()
+  reset({ chats = { a, { name = "Berry" }, b } })
+  local M = load()
+  local r = M._t.runExport(true)
+  check(r == "done" and has("パプリカ🍅") and has("パプリカ🌶️") and has("Berry"), "3 件とも: " .. table.concat(outFiles(), ","))
+  check((W.scrolls or 0) <= 6, "短い一覧で送り続けない: " .. tostring(W.scrolls))
+  -- 点単位で動かない一覧（実機）で、2つが1番目と4番目にある長い一覧
+  a, b = pair()
+  local list = numbered(30)
+  table.insert(list, 1, a); table.insert(list, 4, b)
+  reset({ chats = list, knobs = { pixelScrollIgnored = true } })
+  M = load()
+  r = M._t.runExport(true)
+  check(r == "done" and #outFiles() == 20 and has("パプリカ🍅") and has("パプリカ🌶️"),
+    "20 件・2つとも: " .. tostring(r) .. " " .. table.concat(outFiles(), ","))
+  check((W.scrolls or 0) <= 12, "送った回数: " .. tostring(W.scrolls))
   safe()
 end)
 
-test("実機の行の並び（最後のメッセージが時刻の 20pt 下）でも、1字・絵文字だけの名前の行で最後のメッセージを名前として書かない", function()
-  reset({ knobs = { previewDY = 11 } })
-  local M = withTargets({ { name = "母", preview = "秘密のメッセージ1" }, { name = "🐱", preview = "秘密のメッセージ2" },
-                          { name = "Berry", preview = "秘密のメッセージ3" } })
-  M._t.runExport()
-  local nt = namesTxt()
-  check(nt:find("\n母\n", 1, true) and nt:find("\nBerry\n", 1, true), "名前は集めた:\n" .. nt)
-  check(not nt:find("秘密", 1, true), "最後のメッセージは書かない:\n" .. nt)
+test("保存ダイアログの途中で別のアプリが前に出て止まっても、ダイアログを閉じて次の行から続ける", function()
+  reset({ chats = numbered(6), knobs = { frontLostOnSheetN = 2 } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ok: 5") and line(hb, "ng: 1"), "2番目だけ失敗し、残りは保存:\n" .. hb)
+  check(#outFiles() == 5 and not has("トーク2番"), "保存: " .. table.concat(outFiles(), ","))
+  check(not W.sheet, "保存ダイアログは閉じた")
+  check(not W.typedElsewhere and not W.clickedElsewhere, "他のアプリを操作していない")
+end)
+
+test("一覧が読めなくなったら（時刻が見えない）、送り続けずに止めて失敗に書く", function()
+  reset({ chats = numbered(5) })
+  local M = load()
+  local n0 = 0
+  local orig = hs.eventtap.leftClick
+  hs.eventtap.leftClick = function(pt)
+    orig(pt)
+    n0 = n0 + 1
+    if n0 == 4 then W.knobs.noRowTimes = true end    -- 2件目を開いた後から一覧の時刻が読めない
+  end
+  local r = M._t.runExport(true)
+  hs.eventtap.leftClick = orig
+  check(r == "done" and (W.scrolls or 0) <= 4, "送り続けない: " .. tostring(r) .. " scrolls=" .. tostring(W.scrolls))
+  check(heartbeat():find("一覧: [一覧] ", 1, true), "失敗に書く:\n" .. heartbeat())
+end)
+
+test("「…」で切れた名前の行も、押す前から開いていたトークなら開いたとみなす", function()
+  reset({ chats = { { name = "il 石川ありがとう", ocrRow = "il 石川あり…" }, { name = "Berry" } } })
+  W.open = "il 石川ありがとう"
+  local M = load()
+  M._t.runExport(true)
+  check(has("il 石川ありがとう") and has("Berry"), "2 件とも: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ng: 0"), "失敗にしない:\n" .. heartbeat())
   safe()
 end)
 
-test("ずれが 0.5pt でも、スクロールの量を整数で渡して一覧を最後まで読む", function()
-  reset({ knobs = { ocrHalf = true } })
-  local list = {}
-  for i = 1, 30 do list[#list + 1] = { name = "トーク" .. i .. "番" } end
-  local M = withTargets(list)
-  M._t.runExport()
-  check(not W.fractionalScroll, "小数の量を渡していない")
-  check(namesTxt():find("\nトーク30番\n", 1, true), "最後の行まで集めた:\n" .. namesTxt())
+test("名前の文字が読めない行（絵文字だけの名前を OCR が何も返さない）も押して保存する", function()
+  reset({ chats = { { name = "Berry" }, { name = "🐱", ocrRow = "", ocrHeader = "" }, { name = "直承Jikisho" } } })
+  local M = load()
+  M._t.runExport(true)
+  check(has("🐱") and has("Berry") and has("直承Jikisho"), "3 件とも: " .. table.concat(outFiles(), ","))
   safe()
 end)
 
-test("似ているだけの名前（村田研 と 村田研OB会）は、近さ付きの候補として書く", function()
-  reset()
-  local M = withTargets({ { name = "直承Jikisho" }, { name = "村田研OB会" } })
-  M._t.runExport()
-  check(not W.saved, "書き出さない")
-  check(namesTxt():find("村田研 → 村田研OB会（0.75）", 1, true), "候補:\n" .. namesTxt())
+test("「トークを保存」が無いトークを閉じる時は、ヘッダ右端のボタン（通話など）を押さない", function()
+  local list = { { name = "Berry" }, { name = "母", menuItems = { "通知オフ", "トーク履歴を削除" } }, { name = "直承Jikisho" } }
+  reset({ chats = list, knobs = { callOCR = true } })
+  local M = load()
+  M._t.runExport(true)
+  check(not W.called, "通話ボタンを押していない")
+  check(#outFiles() == 2, "ほかは保存: " .. table.concat(outFiles(), ","))
+  local imgs = 0
+  for _, f in ipairs(lsdir(DEBUG)) do if f:find("メニュー", 1, true) then imgs = imgs + 1 end end
+  check(imgs == 1, "飛ばしたトークの撮影画像は最初の分だけ残す: " .. imgs)
   safe()
 end)
 
-test("名前を集めている時に人が触ったら、全体を止めて何も開かず、理由を診断ファイルに書く", function()
-  reset({ knobs = { userActsAtScroll = 2 } })
-  local M = withTargets({ { name = "Berry" }, { name = "直承Jikisho" } })
-  local r = M._t.runExport()
-  check(r == "aborted", "中断: " .. tostring(r))
-  check(#W.openLog == 0 and not W.saved, "何も開いていない")
-  check(heartbeat():find("今のトーク名を集めている時に中断", 1, true), "heartbeat に中断:\n" .. heartbeat())
-  local rep = readfile(DEBUG .. "/latest.txt") or ""
-  check(rep:find("今のトーク名を集める", 1, true) and rep:find("人の操作", 1, true), "診断ファイルに理由:\n" .. rep)
+test("保存したばかりのトークに新着が来て一番上に来ても、失敗にも 20 件にも数えない", function()
+  for _, k in ipairs({ { 4, "トーク2番" }, { 7, "トーク3番" } }) do   -- k[1] 回目に押した時に k[2] に新着
+    reset({ chats = numbered(30), knobs = { reorderAtClick = k[1], reorderName = k[2] } })
+    local M = load()
+    local r = M._t.runExport(true)
+    check(r == "done" and #outFiles() == 20 and has("トーク20番"), k[2] .. ": 20 件: " .. table.concat(outFiles(), ","))
+    check(line(heartbeat(), "ok: 20") and line(heartbeat(), "ng: 0"), k[2] .. ": 失敗にしない:\n" .. heartbeat())
+    safe()
+  end
 end)
 
-test("検索欄にフォーカスが入らない時は、キーを送らずに AX で消してから名前を集める", function()
-  reset({ knobs = { focusIgnored = true, clickNoFocus = true } })
-  local M = withTargets({ { name = "Berry" }, { name = "直承Jikisho" } })
-  W.search = "前の検索"
-  M._t.runExport()
-  check(W.draft == nil, "入力欄に何も打っていない・消していない: " .. tostring(W.draft))
-  check(namesTxt():find("\nBerry\n", 1, true), "名前を集めた:\n" .. namesTxt())
+test("見えている最後の行で保存ダイアログが残っても、閉じてから下へ送って続ける", function()
+  reset({ chats = numbered(30) })
+  load()._t.runExport(true)
+  local last = W.opensAtFirstScroll                -- 見えている最後の行（下へ送る前に開いた数）
+  check(last and last >= 5, "見えている行の数: " .. tostring(last))
+  for _, k in ipairs({ last - 1, last }) do
+    reset({ chats = numbered(30), knobs = { frontLostOnSheetN = k } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    check(line(hb, "ok: 19") and line(hb, "ng: 1") and #outFiles() == 19,
+      k .. " 件目で止まっても残りを保存: " .. table.concat(outFiles(), ",") .. "\n" .. hb)
+    check(not W.sheet, "保存ダイアログは閉じた")
+  end
+end)
+
+test("「トークを保存」が無いトークが続いたら（読み方が変わった？）、一覧の終わりまで回らずに止めて失敗に書く", function()
+  local list = numbered(30)
+  for i = 1, 30 do list[i].menuItems = { "通知オフ", "トーク履歴を削除" } end
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  check(#W.openLog == 8, "8 件で止めた: " .. #W.openLog)
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("「トークを保存」が無いトークが 8 件続いた", 1, true), "失敗に書く:\n" .. hb)
+  local imgs = 0
+  for _, f in ipairs(lsdir(DEBUG)) do if f:find("番目_メニュー", 1, true) then imgs = imgs + 1 end end
+  check(imgs == 2, "飛ばした行の撮影画像は最初の2件だけ: " .. imgs)
   safe()
 end)
 
-test("フルスクリーン（AX が 30pt 下）でも名前を集める", function()
-  reset({ knobs = { axDY = 30 } })
-  local M = withTargets({ { name = "直承Jikisho" }, { name = "Berry" } })
-  W.search = "前の検索"
-  M._t.runExport()
-  check(namesTxt():find("\nBerry\n", 1, true) and W.saved, "集めて書き出した:\n" .. namesTxt())
+test("最初の行を押しても開かず、前から開いていた別のトークのままなら、それを代わりに保存しない", function()
+  local list = numbered(5)
+  list[1].noOpen = true
+  reset({ chats = list })
+  W.open = "トーク4番"                             -- 押す前から4番目のトークが開いている
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("一覧の1番目: [トーク確認]", 1, true), "1番目は開かなかった失敗:\n" .. hb)
+  check(not has("トーク1番") and has("トーク4番") and #outFiles() == 4, "4番は自分の行で1回だけ: " .. table.concat(outFiles(), ","))
   safe()
 end)
 
-test("前の件の保存ダイアログが残っていたら、閉じてから名前を集める", function()
-  reset()
-  local M = withTargets({ { name = "Berry" }, { name = "直承Jikisho" } })
+test("今日の結果に残す保存済みの名前は、読み込み直しても増えない", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }) })
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  writefile(REPO .. "/mac/.last_result", "day=" .. TODAY .. "\nversion=v4.1-c7f58660\nng=1\nok=Berry\n")
+  for _ = 1, 3 do
+    local M = load()
+    W.lastHID = T - 999
+    at9am(function() M._t.maybeRun() end)
+  end
+  local res = readfile(REPO .. "/mac/.last_result") or ""
+  local n = select(2, res:gsub("\nok=", ""))
+  check(n == 2, "保存済みは2件のまま: " .. n .. "\n" .. res)
+  check(not res:find("とのトーク", 1, true) and not res:find("chatwith", 1, true), "別名は書かない:\n" .. res)
+end)
+
+test("前の版（名前で探していた版）が今日保存したトークは、新しい版でのやり直しで保存し直さない", function()
+  reset({ chats = chats({ "Berry", "p Koyo", "パプリカ🌶️", "オーチュー/小林央忠", "直承Jikisho" }) })
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  writefile(REPO .. "/mac/.last_result", "day=" .. TODAY .. "\nversion=v4.1-c7f58660\nng=8\n" ..
+    "ok=Berry\nok=p Koyo\nok=パプリカ🌶️\nok=オーチュー/小林央忠\n")
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  check(#outFiles() == 1 and has("直承Jikisho"), "まだの1件だけ保存した: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ok: 5") and line(heartbeat(), "ng: 0"), "合わせて 5 件:\n" .. heartbeat())
+  safe()
+end)
+
+test("ヘッダが押す前のままなら、前のトークが「トークを保存」の無いトークでも、その行は開かなかった失敗にする", function()
+  local list = numbered(4)
+  list[2].menuItems = { "通知オフ", "トーク履歴を削除" }   -- Keep メモ など（保存名が分からない）
+  list[3].noOpen = true
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("一覧の3番目: [トーク確認]", 1, true), "トーク3番の行は開かなかった失敗:\n" .. hb)
+  check(namesTxt():find("\n3. トーク3番\t失敗: [トーク確認]", 1, true)
+        and namesTxt():find("\n2. トーク2番\t⋮ に「トークを保存」が無い（20 件に数えない）", 1, true),
+    "names.txt にも失敗と書く:\n" .. namesTxt())
+  safe()
+end)
+
+test("ヘッダの名前が読めないトーク（1字・絵文字だけ）で押した行が開かなければ、前と同じ保存名で気づいて失敗にする", function()
+  reset({ chats = { { name = "母" }, { name = "🐱", noOpen = true }, { name = "Berry" } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ok: 2") and line(hb, "ng: 1") and hb:find("一覧の2番目: [トーク確認]", 1, true),
+    "2番目は失敗（黙って飛ばさない）:\n" .. hb)
+  check(has("母") and has("Berry") and #outFiles() == 2, "ほかは保存: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("押した行で、この実行でもう保存したトークがまた開いたら、保存せず 20 件にも数えない", function()
+  local list = numbered(21)
+  list[4].opens = "トーク2番"                      -- 4番目の行を押すと（3番目から変わって）2番目のトークが開く
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  -- 同じトークは 20 件に数えないので、21 番目の行まで進んで 20 件保存する
+  check(#outFiles() == 20 and has("トーク21番") and not has("トーク4番"),
+    "同じトークは数えない: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ng: 0"), "失敗にしない:\n" .. heartbeat())
+  safe()
+end)
+
+test("一覧が途中で並び替わっても（新着）、同じトークを2回保存せず、上から 20 件に入れる", function()
+  reset({ chats = numbered(30), knobs = { reorderAtClick = 7, reorderName = "トーク25番" } })   -- 3件目を開いた時に新着
+  local M = load()
+  M._t.runExport(true)
+  local seen, dup = {}, false
+  for _, n in ipairs(W.openLog) do if seen[n] and n ~= "トーク25番" then dup = true end; seen[n] = true end
+  check(has("トーク25番") and #outFiles() == 20, "新着のトークも 20 件に入れた: " .. table.concat(outFiles(), ",") ..
+    " / 開いた順: " .. table.concat(W.openLog, ","))
+  check(line(heartbeat(), "ok: 20") and line(heartbeat(), "ng: 0"), "数:\n" .. heartbeat())
+  safe()
+end)
+
+test("名前が同じに見えるトーク（かにっこにー と かにっこにー (2)）も、それぞれの保存名で保存する", function()
+  reset({ chats = chats({ "かにっこにー", "かにっこにー (2)", "Berry" }) })
+  local M = load()
+  M._t.runExport(true)
+  check(has("かにっこにー") and has("かにっこにー (2)") and has("Berry"), "3 件とも: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("名前の絵文字を OCR が別の字に読んでも、LINE の保存名（パプリカ🌶️）のまま保存する", function()
+  reset({ chats = { { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true }, { name = "Berry" } } })
+  local M = load()
+  M._t.runExport(true)
+  check(has("パプリカ🌶️") and has("Berry"), "保存名のまま: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("途中で人が触ったら止め、次はもう保存したトークを保存し直さずに続きから", function()
+  reset({ chats = numbered(30), knobs = { userActsAtClick = 13 } })
+  local M = load()
+  at9am(function()
+    M._t.maybeRun()
+    check(heartbeat():find("中断", 1, true), "1回目は中断:\n" .. heartbeat())
+    local first = #outFiles()
+    check(first >= 3 and first < 20, "途中まで保存: " .. first)
+    W.knobs.userActsAtClick = nil; W.lastHID = T - 999
+    local saves0 = W.pressedSaveN or 0
+    W.cancelled = false
+    M._t.maybeRun()
+    check(#outFiles() == 20, "合わせて 20 件: " .. table.concat(outFiles(), ","))
+    check(W.cancelled, "保存済みのトークは保存ダイアログをキャンセルした")
+    local hb = heartbeat()
+    check(line(hb, "ok: 20") and line(hb, "ng: 0"), "合わせて 20 件 OK:\n" .. hb)
+    check(namesTxt():find("今日もう保存済み", 1, true), "names.txt に保存済みと書く")
+  end)
+  safe()
+end)
+
+test("実機の行の並び（最後のメッセージが時刻の 20pt 下）・1字や絵文字だけの名前でも、最後のメッセージを名前として扱わない", function()
+  reset({ chats = { { name = "母", preview = "秘密のメッセージ1" }, { name = "🐱", preview = "秘密のメッセージ2" },
+                    { name = "Berry", preview = "秘密のメッセージ3" } }, knobs = { previewDY = 11 } })
+  local M = load()
+  M._t.runExport(true)
+  check(#outFiles() == 3, "3 件: " .. table.concat(outFiles(), ","))
+  check(not namesTxt():find("秘密", 1, true) and not (readfile(DEBUG .. "/latest.txt") or ""):find("秘密", 1, true),
+    "names.txt・診断に会話の中身を書かない")
+  for _, l in ipairs(W.logs) do check(not l:find("秘密", 1, true), "コンソールにも出さない: " .. l) end
+  safe()
+end)
+
+test("フルスクリーン（AX が 30pt 下）・時刻が境目より右（実機 x=344）・0.5pt のずれでも、上から順に保存する", function()
+  for _, k in ipairs({ { axDY = 30 }, { timeDX = 285 }, { ocrHalf = true } }) do
+    local list = numbered(25)
+    if k.timeDX then for _, c in ipairs(list) do c.noAX = true end end
+    reset({ chats = list, knobs = k })
+    local M = load()
+    W.search = "前の検索"
+    M._t.runExport(true)
+    check(#outFiles() == 20, "20 件: " .. table.concat(outFiles(), ","))
+    check(not W.fractionalScroll, "小数の量でスクロールしていない")
+    safe()
+  end
+end)
+
+test("前の件の保存ダイアログが残っていたら、閉じてから始める", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }) })
+  local M = load()
   W.open = "直承Jikisho"; W.sheet = { value = "[LINE]直承Jikisho.txt" }; W.focus = "sheet"
-  M._t.runExport()
+  M._t.runExport(true)
   check(W.cancelled and W.scrollsAtCancel == 0, "スクロールより先に閉じた: " .. tostring(W.scrollsAtCancel))
-  check(namesTxt():find("\nBerry\n", 1, true), "集めた:\n" .. namesTxt())
+  check(#outFiles() == 2, "2 件: " .. table.concat(outFiles(), ","))
   safe()
+end)
+
+test("検索欄にフォーカスが入らない時は、キーを送らずに AX で消してから始める", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { focusIgnored = true, clickNoFocus = true } })
+  local M = load()
+  W.search = "前の検索"
+  M._t.runExport(true)
+  check(W.draft == nil, "入力欄に何も打っていない・消していない: " .. tostring(W.draft))
+  check(#outFiles() == 2, "2 件: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("一覧を読んでいる時に人が触ったら、何も開かずに止める", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }), knobs = { userActsAtScroll = 1 } })
+  local M = load()
+  local r = M._t.runExport(true)
+  check(r == "aborted", "中断: " .. tostring(r))
+  check(#W.openLog == 0 and #outFiles() == 0, "何も開いていない")
+  check(heartbeat():find("中断", 1, true), "heartbeat に中断:\n" .. heartbeat())
 end)
 
 -- ===================== 人が戻ってきた =====================
@@ -1939,31 +2174,6 @@ test("フォーカスが分からない時はキーを送らず、AX で検索�
   safe()
 end)
 
-test("中断した日のやり直しは、済んだトークを飛ばして残りから進める", function()
-  reset()
-  local M = load()
-  for _, t in ipairs(M._t.targets) do W.chats[#W.chats + 1] = { name = type(t) == "table" and t[1] or t } end
-  local first = type(M._t.targets[1]) == "table" and M._t.targets[1][1] or M._t.targets[1]
-  local saves = 0
-  local origSet = hs.pasteboard.setContents
-  at9am(function()
-    W.knobs.userActsAtClick = 30
-    M._t.maybeRun()
-    local hb1 = heartbeat()
-    check(hb1:find("中断", 1, true), "1回目は中断: \n" .. hb1)
-    W.knobs.userActsAtClick = nil; W.clickN = 0; W.lastHID = T - 999
-    W.search = ""; W.saved = nil
-    check(W.openLog[1] == first, "1回目は " .. first .. " から開いた")
-    W.openLog = {}
-    M._t.maybeRun()
-    check(#W.openLog > 0, "2回目も開いた")
-    for _, n in ipairs(W.openLog) do check(n ~= first, "済んだ " .. first .. " は開き直していない") end
-    local hb2 = heartbeat()
-    check(line(hb2, "ok: " .. #M._t.targets), "合わせて全件 OK: \n" .. hb2)
-  end)
-  hs.pasteboard.setContents = origSet
-end)
-
 test("昼になっても見送りが続く日は、理由を heartbeat に残す（1日1回）", function()
   reset({ chats = chats({ "Berry" }), knobs = { cameraInUse = true } })
   local M = load()
@@ -1982,25 +2192,21 @@ test("昼になっても見送りが続く日は、理由を heartbeat に残す
 end)
 
 -- ===================== 1日分の実行 =====================
-test("runExport: 全件を回し、heartbeat に段と画像を書いて push する", function()
-  reset()
+test("runExport: 一覧の上から順に回し、heartbeat に段と画像を書いて push する", function()
+  local list = numbered(5)
+  list[3].noOpen = true
+  reset({ chats = list })
   local M = load()
-  for _, t in ipairs(M._t.targets) do
-    local name = type(t) == "table" and t[1] or t
-    if name ~= "村田研" then W.chats[#W.chats + 1] = { name = name } end
-  end
   M._t.runExport()
   local hb = heartbeat()
-  local n = #M._t.targets
   check(hb:find("\nversion: v4%.1%-%x+\n"), "heartbeat に版（v4.1-中身から作る印）")
-  check(line(hb, "ok: " .. (n - 1)) and line(hb, "ng: 1"), "ok/ng の数: \n" .. hb)
-  check(hb:find("村田研: [トーク選択]", 1, true), "失敗した段を書く")
+  check(line(hb, "ok: 4") and line(hb, "ng: 1"), "ok/ng の数: \n" .. hb)
+  check(hb:find("一覧の3番目: [トーク確認]", 1, true), "失敗した段を書く:\n" .. hb)
   check(hb:find("（画像: Dropbox の ", 1, true) and hb:find("\ndebug: Dropbox の ", 1, true), "画像の置き場を書く（Dropbox）")
   check(exists(DEBUG .. "/latest.txt"), "診断ファイルを Dropbox に書いた")
   check(not hb:find(HOME, 1, true), "heartbeat にユーザー名入りのパスを書かない")
   check(W.synced == 1, "sync.sh を1回呼んだ")
-  local files = run("ls " .. sh(OUT))
-  check(select(2, files:gsub("_" .. TODAY .. "%.txt", "")) == n - 1, "OUT_DIR に今日付きが " .. (n - 1) .. " 件")
+  check(#outFiles() == 4, "OUT_DIR に今日付きが 4 件: " .. table.concat(outFiles(), ","))
   safe()
 end)
 
@@ -2337,28 +2543,22 @@ test("読み込み時: 新しい版なら、何も押さない診断を1回だ�
   check(#W.after == 0, "同じ版をもう一度読み込んでも撮らない")
 end)
 
-test("maybeRun: 新しい版が入った日は、失敗していた分だけもう一度試す（版ごとに1回）", function()
-  reset()
-  local M = load()
-  local names = {}
-  for _, t in ipairs(M._t.targets) do names[#names + 1] = type(t) == "table" and t[1] or t end
-  -- 1件目は今回も一覧に無い（失敗が残る）。それでも同じ版では2度やらない
-  for i = 2, #names do W.chats[#W.chats + 1] = { name = names[i] } end
+test("maybeRun: 新しい版が入った日は、もう一度一覧を回し、保存済みのトークは保存し直さない（版ごとに1回）", function()
+  reset({ chats = numbered(4) })
   writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
-  local res = { "day=" .. TODAY, "version=v4.1-00000000", "ng=2" }
-  for i = 3, #names do res[#res + 1] = "ok=" .. names[i] end
-  writefile(REPO .. "/mac/.last_result", table.concat(res, "\n") .. "\n")
-  M = load()                                       -- 新しい版を読み込んだ
+  writefile(REPO .. "/mac/.last_result", "day=" .. TODAY .. "\nversion=v4.1-00000000\nng=1\n" ..
+    "ok=トーク1番\nok=トーク2番\nok=トーク4番\n")
+  local M = load()                                 -- 新しい版を読み込んだ
   at9am(function()
     M._t.maybeRun()
-    check(#W.openLog == 1 and W.openLog[1] == names[2],
-      "失敗していた2件だけ試した（1件目は見つからず、2件目を開いた）: " .. table.concat(W.openLog, ","))
-    check(line(heartbeat(), "ok: " .. (#names - 1)) and line(heartbeat(), "ng: 1"), "合わせて1件だけ NG:\n" .. heartbeat())
+    check(#outFiles() == 1 and has("トーク3番"), "失敗していた1件だけ保存した: " .. table.concat(outFiles(), ","))
+    check(line(heartbeat(), "ok: 4") and line(heartbeat(), "ng: 0"), "合わせて 4 件 OK:\n" .. heartbeat())
     local synced = W.synced
     W.lastHID = T - 999
     M._t.maybeRun()
     check(W.synced == synced, "同じ版ではもうやらない")
   end)
+  safe()
 end)
 
 test("maybeRun: 前の版（v4）が失敗した日も、heartbeat から読んでやり直す", function()
@@ -2684,11 +2884,10 @@ test("昼の「見送り中」は、今日もう走った日（中断を含む�
 end)
 
 test("手動の ⌘⌥⌃L を途中で止めても、自動実行の失敗数と新しい版でのやり直しは残る", function()
-  reset()
+  local list = numbered(5)
+  list[2].noOpen = true; list[4].noOpen = true    -- 2件は開かない
+  reset({ chats = list })
   local M = load()
-  local names = {}
-  for _, t in ipairs(M._t.targets) do names[#names + 1] = type(t) == "table" and t[1] or t end
-  for i = 3, #names do W.chats[#W.chats + 1] = { name = names[i] } end   -- 2件は見つからない
   at9am(function() M._t.maybeRun() end)
   W.knobs.userActsAtClick = W.clickN + 1; W.lastHID = T - 999
   M._t.runExport(false)                           -- 手動で全件 → 触って中断
@@ -2881,17 +3080,6 @@ test("昨日と同じ理由で今日も始められない時も、今日の分�
   check(W.synced == 1 and heartbeat():find("last_run: " .. os.date("%Y-%m-%d"), 1, true), "今日の理由を push した")
   W.logs = {}; M.status()
   check(not table.concat(W.logs, "\n"):find("今日の自動実行: まだ", 1, true), "「まだ」と並べて出さない")
-end)
-
-test("TARGETS が空なら、毎分アラートを出さず、理由を1日1回だけ残す", function()
-  reset({ chats = chats({ "Berry" }) })
-  local M = load()
-  for i = #M._t.targets, 1, -1 do table.remove(M._t.targets, i) end
-  at9am(function() for _ = 1, 4 do W.lastHID = T - 999; M._t.maybeRun() end end)
-  local n = 0
-  for _, a in ipairs(W.alerts) do if a:find("TARGETS が空", 1, true) then n = n + 1 end end
-  check(n == 1 and W.synced == 1, "1回だけ: alerts=" .. n .. " synced=" .. W.synced)
-  check(heartbeat():find("TARGETS が空", 1, true), "heartbeat に理由")
 end)
 
 test("窓を前に出している間に人が戻ったら、窓を動かさずに止める", function()
