@@ -19,3 +19,6 @@ mac/debug/
 mac/.last_run
 mac/.last_result
 mac/.loaded_version
+
+# Mac が眠った・起きた・ロックした時刻（診断用。この Mac だけの記録）
+mac/.power_log

@@ -513,7 +513,10 @@ local function execute(cmd)
   end
   if cmd:match("status %-%-porcelain") then return W.knobs.dirty or "", true end
   if cmd:match("push %-q origin main") then W.pushedAfterRebase = true; return "", true end
-  if cmd:match("pmset %-g") then return " displaysleep         " .. (W.knobs.displaySleep or 10) .. "\n", true end
+  if cmd:match("pmset %-g") then
+    return " displaysleep         " .. (W.knobs.displaySleep or 10) .. "\n" ..
+      (W.knobs.systemSleep and (" sleep                " .. W.knobs.systemSleep .. "\n") or ""), true
+  end
   if cmd:match("^/usr/bin/sips") then W.sips = (W.sips or 0) + 1; return "", true end   -- Linux には無い → PNG のまま
   return "", true
 end
@@ -558,9 +561,11 @@ hs = {
     end,
     declareUserActivity = function() W.declared = true end,
     currentAssertions = function() return W.knobs.assertions or {} end,
-    watcher = { new = function() return { start = function() end, stop = function() end } end,
-                systemDidWake = 1, screensDidUnlock = 2, sessionDidBecomeActive = 3 },
+    watcher = { new = function(fn) W.watcherFn = fn; return { start = function() end, stop = function() end } end,
+                systemDidWake = 1, screensDidUnlock = 2, sessionDidBecomeActive = 3, systemWillSleep = 4,
+                screensDidLock = 5, screensDidSleep = 6, screensDidWake = 7, systemWillPowerOff = 8 },
   },
+  battery = { powerSource = function() return W.knobs.powerSource end },
   camera = {
     allCameras = function()
       return { { isInUse = function() return W.knobs.cameraInUse == true end } }
@@ -2349,6 +2354,133 @@ test("自動実行では、暗くなった画面を起こしてから始める",
   M._t.runExport(true)
   check(W.declared, "画面を起こした")
   check(W.displayIdle == false, "画面を消さない設定は元に戻した")
+end)
+
+-- ===================== Mac の眠り・ロックの記録 =====================
+local DAY = os.date("%Y-%m-%d")
+local function powerLog(lines) writefile(REPO .. "/mac/.power_log", table.concat(lines, "\n") .. "\n") end
+local function latest() return readfile(DEBUG .. "/latest.txt") or "" end
+-- 今日の h:m を「今」にして fn を動かす（os.time() と、時刻を渡さない os.date）
+local function atClock(h, m, fn)
+  local realdate, realtime = os.date, os.time
+  local t0 = realdate("*t"); t0.hour, t0.min, t0.sec = h, m, 0
+  local fake = realtime(t0)
+  os.time = function(t) if t == nil then return fake end return realtime(t) end
+  os.date = function(fmt, at) return realdate(fmt, at or fake) end
+  local ok, err = pcall(fn)
+  os.date, os.time = realdate, realtime
+  if not ok then error(err, 0) end
+end
+
+test("眠り: 眠った・起きた・ロックを時刻つきで記録し、古いものは消す", function()
+  reset({ knobs = { powerSource = "Battery Power" } })
+  local M = load()
+  local w = hs.caffeinate.watcher
+  check(readfile(REPO .. "/mac/.power_log"):find(" load 電池\n", 1, true), "読み込みも記録")
+  local base = #W.after
+  W.watcherFn(w.systemWillSleep); W.watcherFn(w.screensDidSleep); W.watcherFn(w.screensDidLock)
+  check(#W.after == base, "眠る・画面が消える・ロックでは確認を予約しない")
+  W.watcherFn(w.systemDidWake)
+  check(#W.after == base + 1, "起きた後の確認を今までどおり予約する")
+  W.watcherFn(w.screensDidUnlock)
+  check(#W.after == base + 2, "ロック解除の後の確認も今までどおり予約する")
+  local log = readfile(REPO .. "/mac/.power_log")
+  for _, ev in ipairs({ "sleep", "wake", "off", "lock", "unlock" }) do
+    check(log:find(" " .. ev .. " 電池\n", 1, true), ev .. " を記録: " .. log)
+  end
+  W.knobs.powerSource = nil
+  for _ = 1, 70 do M._t.notePower("on") end
+  local n = 0
+  for _ in readfile(REPO .. "/mac/.power_log"):gmatch("[^\n]+") do n = n + 1 end
+  check(n == 60, "60行だけ残す: " .. n)
+  check(readfile(REPO .. "/mac/.power_log"):find(" on %-\n$"), "電源が分からない時は -")
+end)
+
+test("眠り: 07:00 をまたいで眠っていた日は、起きて少し後の確認で理由を heartbeat に1回だけ残す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { powerSource = "Battery Power", systemSleep = 1 } })
+  local M = load()
+  powerLog({ DAY .. " 00:41:00 sleep 電池", DAY .. " 00:41:00 lock 電池", DAY .. " 09:52:00 wake 電池" })
+  check(M._t.sleptThrough() == "00:41〜09:52", "眠っていた間: " .. tostring(M._t.sleptThrough()))
+  W.lastHID = T - 5                                -- 起きてすぐ使っている
+  atClock(9, 53, function() M._t.maybeRun() end)
+  check(heartbeat() == "" and W.synced == 0, "起きた直後（ネットが戻る前）は push しない")
+  atClock(9, 54, function() M._t.maybeRun(); M._t.maybeRun() end)
+  local hb = heartbeat()
+  check(hb:find("note: 見送り中: 使用中", 1, true) and hb:find("（07:00 は Mac が眠っていた: 00:41〜09:52）", 1, true),
+    "理由と眠っていた間を書いた: " .. hb)
+  check(W.synced == 1 and #W.clicks == 0, "1回だけ push し、何も押していない")
+  local r = latest()
+  check(r:find("✗ 07:00 は Mac が眠っていた（00:41〜09:52）", 1, true), "診断にも出す:\n" .. r)
+  check(r:find("最近の眠り・ロック（新しい順）: 09:52 起きた（電池） / 00:41 ロック（電池） / 00:41 眠った（電池）", 1, true),
+    "記録を新しい順に:\n" .. r)
+  check(r:find("Mac が眠るまで: 1 分", 1, true) and r:find("電源: 電池", 1, true), "眠るまでの設定と電源:\n" .. r)
+  -- 昼になっても走れていなければ、その時の理由をもう1回だけ残す（朝の分で止めない）
+  W.knobs.locked = true
+  atClock(12, 5, function() M._t.maybeRun(); M._t.maybeRun() end)
+  hb = heartbeat()
+  check(hb:find("note: 見送り中: 画面がロック中（07:00 は Mac が眠っていた: 00:41〜09:52）", 1, true), "昼の理由: " .. hb)
+  check(W.synced == 2, "昼に1回だけ push: " .. W.synced)
+  atClock(13, 0, function() M._t.maybeRun() end)
+  check(W.synced == 2, "それ以上は書かない")
+end)
+
+test("眠り: 起きた記録が抜けている時は「眠っていた」と決めつけない", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M = load()
+  local cases = {
+    { "07:00 より前に起きていた", { DAY .. " 00:41:00 sleep 電池", DAY .. " 06:30:00 wake 電源", DAY .. " 06:40:00 lock 電源" } },
+    { "眠ったきり", { DAY .. " 00:41:00 sleep 電池" } },
+    { "再起動して起きていた（起きた記録なし）", { DAY .. " 00:41:00 sleep 電池", DAY .. " 06:30:00 load 電池",
+      DAY .. " 06:31:00 unlock 電池", DAY .. " 08:00:00 sleep 電池", DAY .. " 09:00:00 wake 電池" } },
+    { "電源を切った", { DAY .. " 00:41:00 sleep 電池", DAY .. " 02:05:00 poweroff 電池", DAY .. " 09:52:00 load 電源",
+      DAY .. " 10:30:00 sleep 電源", DAY .. " 11:00:00 wake 電源" } },
+    { "前の日に寝て朝に再起動", { os.date("%Y-%m-%d", os.time() - 86400) .. " 23:00:00 sleep 電池",
+      DAY .. " 06:00:00 load 電池", DAY .. " 07:30:00 sleep 電池", DAY .. " 08:00:00 wake 電池" } },
+  }
+  for _, c in ipairs(cases) do
+    powerLog(c[2])
+    check(M._t.sleptThrough() == nil, c[1] .. ": " .. tostring(M._t.sleptThrough()))
+  end
+  W.lastHID = T - 5
+  atClock(9, 30, function() M._t.maybeRun() end)
+  check(heartbeat() == "" and W.synced == 0, "朝のうちは書かない・push しない: " .. heartbeat())
+  -- ロック解除・画面がついたは起きていないと出ない（起きた記録の代わりになる）
+  powerLog({ DAY .. " 00:41:00 sleep 電池", DAY .. " 00:41:00 off 電池", DAY .. " 09:52:00 unlock 電池" })
+  check(M._t.sleptThrough() == "00:41〜09:52", "ロック解除で眠りの終わり: " .. tostring(M._t.sleptThrough()))
+  -- 前の日に寝て、07:00 を過ぎてから起きた（日をまたぐ）
+  local y = os.date("%Y-%m-%d", os.time() - 86400)
+  powerLog({ y .. " 23:50:00 sleep 電池", DAY .. " 08:05:00 wake 電池" })
+  check(M._t.sleptThrough() == os.date("%m/%d", os.time() - 86400) .. " 23:50〜08:05",
+    "日をまたいだ眠り: " .. tostring(M._t.sleptThrough()))
+end)
+
+test("眠り: 今日もう書き出した日は、眠っていたことを失敗として出さない", function()
+  reset({ chats = chats({ "Berry" }) })
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  local M = load()
+  powerLog({ DAY .. " 00:41:00 sleep 電池", DAY .. " 09:52:00 wake 電池" })
+  local s = table.concat(M._t.statusLines(), "\n")
+  check(not s:find("Mac が眠っていた", 1, true), "済んだ日は出さない:\n" .. s)
+  check(s:find("最近の眠り・ロック", 1, true), "記録そのものは出す")
+  atClock(10, 0, function() M._t.maybeRun() end)
+  check(heartbeat() == "" and W.synced == 0, "heartbeat も書かない")
+end)
+
+test("眠り: 昼の見送りは、朝の「眠っていた」以外の heartbeat があれば書き直さない", function()
+  reset({ chats = chats({ "Berry" }), knobs = { locked = true } })
+  local M = load()
+  writefile(REPO .. "/mac/heartbeat.txt", "last_run: " .. DAY .. " 09:10:00\nversion: x\nok: 0\nng: 1\n" ..
+    "note: 全件: Hammerspoon に「画面収録」が許可されていない\n")
+  atClock(12, 5, function() M._t.maybeRun() end)
+  check(heartbeat():find("画面収録", 1, true) and W.synced == 0, "始められない理由を上書きしない: " .. heartbeat())
+end)
+
+test("眠り: 本体の眠りの設定が読めない・画面の設定しか無い時は、その行を出さない", function()
+  reset()
+  local M = load()
+  local s = table.concat(M._t.statusLines(), "\n")
+  check(not s:find("Mac が眠るまで", 1, true), "displaysleep を sleep と読み違えない:\n" .. s)
+  check(not s:find("電源:", 1, true), "電源が分からなければ出さない")
 end)
 
 -- ===================== レビューで見つかった穴（v4.1）=====================
