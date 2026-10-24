@@ -1971,7 +1971,11 @@ end
 local function clock(at)
   return os.date(os.date("%Y%m%d", at) == os.date("%Y%m%d") and "%H:%M" or "%m/%d %H:%M", at)
 end
--- 今日の RUN_AT をまたいで眠っていたなら、その間（"00:41〜09:52"）を返す
+-- 今日の RUN_AT をまたいで眠っていたなら、その間（"00:41〜09:52"）と起きた時刻を返す。
+-- 眠りの終わりは、その後で最初の「起きた・画面がついた・ロック解除」（起きていないと
+-- 出ない）。先に「眠った・読み込み・電源を切る」が来たら、起きた記録が抜けている
+-- （再起動・電池切れ・Hammerspoon が止まっていた）ので決めつけない。
+-- 「ロック・画面が消えた」は眠る時にも出るので飛ばす。
 local function sleptThrough()
   local hh, mm = RUN_AT:match("^(%d+):(%d+)$")
   local t = os.date("*t")
@@ -1980,8 +1984,12 @@ local function sleptThrough()
   for i = #evs, 1, -1 do
     if evs[i].ev == "sleep" and evs[i].at <= runAt then
       for j = i + 1, #evs do
-        if evs[j].ev == "wake" then
-          return evs[j].at > runAt and (clock(evs[i].at) .. "〜" .. clock(evs[j].at)) or nil
+        local e = evs[j].ev
+        if e == "wake" or e == "on" or e == "unlock" then
+          if evs[j].at <= runAt then return nil end
+          return clock(evs[i].at) .. "〜" .. clock(evs[j].at), evs[j].at
+        elseif e == "sleep" or e == "load" or e == "poweroff" then
+          return nil
         end
       end
       return nil
@@ -2640,6 +2648,13 @@ local function checked(why) M.lastCheck = { at = os.time(), why = why } end
 local function heartbeatToday()
   return (readAll(REPO .. "/mac/heartbeat.txt") or ""):find("last_run: " .. os.date("%Y-%m-%d"), 1, true) ~= nil
 end
+-- 今日の heartbeat が、朝の「眠っていた」の見送りだけか（昼の理由はもう1回書いてよい）
+local function sleptNoteOnly()
+  local hb = readAll(REPO .. "/mac/heartbeat.txt") or ""
+  local h = hb:match("last_run: " .. (os.date("%Y-%m-%d"):gsub("%-", "%%-")) .. " (%d+):")
+  return h ~= nil and tonumber(h) < 12 and hb:find("Mac が眠っていた", 1, true) ~= nil
+end
+local WAKE_SETTLE = 120     -- 起きてからこの秒数は、ネットが戻るのを待って push しない
 local function maybeRun()
   local day = today()
   local stateDay, aborts = readState()
@@ -2675,10 +2690,14 @@ local function maybeRun()
   end
   if why then
     -- 昼になっても走れていない日と、RUN_AT の間 Mac が眠っていた日は、理由を
-    -- heartbeat に残す（GitHub から見て走らなかった理由が分かるように。
-    -- 今日の heartbeat がまだ無い時だけ＝1日1回）
-    local slept = stateDay ~= day and sleptThrough()
-    if (t.hour >= 12 or slept) and stateDay ~= day and not heartbeatToday() then
+    -- heartbeat に残す（GitHub から見て走らなかった理由が分かるように）。
+    -- 眠っていた日は起きて少し後に1回、昼にもう1回（朝の分しか無い時だけ）。
+    -- それ以外は今日の heartbeat がまだ無い時だけ＝1日1回
+    local slept, wokeAt = nil, nil
+    if stateDay ~= day then slept, wokeAt = sleptThrough() end
+    local early = slept and os.time() - wokeAt >= WAKE_SETTLE and not heartbeatToday()
+    local noon = t.hour >= 12 and (not heartbeatToday() or sleptNoteOnly())
+    if stateDay ~= day and (early or noon) then
       local note = "見送り中: " .. why .. (slept and ("（" .. RUN_AT .. " は Mac が眠っていた: " .. slept .. "）") or "")
       checked(why)                                -- 診断ファイルの「最後の確認」にこの理由を出す
       writeHeartbeat(0, 0, {}, note)
