@@ -57,23 +57,25 @@ if [ "$BRANCH" != "main" ]; then
   exit 1
 fi
 
-# GitHub のリポジトリが公開になっていたら、取り込みも push もしない（README:
-# 必ず private のまま運用。トーク内容がそのまま入るため）。認証なしで問い合わせ、
-# 見えたら（200）公開、見えなければ（404）非公開。確かめられない時も念のため止める。
-# 生 txt はそのまま残るので、非公開にすれば次の回でまとめて取り込む。
-# 公開のまま使うと決めた時だけ LINE_DUMP_ALLOW_PUBLIC=1 で外せる
+# GitHub のリポジトリが公開でも取り込んで push する（2026-10-24、持ち主が
+# 「公開のままでいい。非公開には後でする」と決めた）。公開中は止めたい時だけ
+# LINE_DUMP_ALLOW_PUBLIC=0 にする。その時は認証なしで問い合わせ、見えたら（200）
+# 公開なので止め、確かめられない時も念のため止める。生 txt はそのまま残るので、
+# 非公開にすれば次の回でまとめて取り込む
 REMOTE="$(git remote get-url origin 2>/dev/null)"
 case "$REMOTE" in
   *github.com[:/]*)
-    SLUG="${REMOTE#*github.com[:/]}"; SLUG="${SLUG%/}"; SLUG="${SLUG%.git}"
-    CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://api.github.com/repos/$SLUG" 2>/dev/null)"
-    if [ "$CODE" = "200" ] && [ "${LINE_DUMP_ALLOW_PUBLIC:-0}" != "1" ]; then
-      log "error: GitHub の $SLUG が公開になっているので、取り込みも push もしない（トーク内容が誰でも読める。README: 必ず private で運用）"
-      log "  GitHub → $SLUG → Settings → General → Danger Zone → Change visibility → Make private。非公開にすれば次の回で取り込む"
-      exit 1
-    elif [ "$CODE" != "200" ] && [ "$CODE" != "404" ]; then
-      log "error: GitHub の $SLUG が公開か非公開か確かめられない（HTTP ${CODE:-応答なし}）ので、念のため取り込みも push もしない"
-      exit 1
+    if [ "${LINE_DUMP_ALLOW_PUBLIC:-1}" != "1" ]; then
+      SLUG="${REMOTE#*github.com[:/]}"; SLUG="${SLUG%/}"; SLUG="${SLUG%.git}"
+      CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://api.github.com/repos/$SLUG" 2>/dev/null)"
+      if [ "$CODE" = "200" ]; then
+        log "error: GitHub の $SLUG が公開になっているので、取り込みも push もしない（LINE_DUMP_ALLOW_PUBLIC=0 の指定）"
+        log "  GitHub → $SLUG → Settings → General → Danger Zone → Change visibility → Make private。非公開にすれば次の回で取り込む"
+        exit 1
+      elif [ "$CODE" != "404" ]; then
+        log "error: GitHub の $SLUG が公開か非公開か確かめられない（HTTP ${CODE:-応答なし}）ので、念のため取り込みも push もしない"
+        exit 1
+      fi
     fi
     ;;
 esac
