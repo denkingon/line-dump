@@ -1195,7 +1195,7 @@ local function rowNames(items, ff, paneX)
     end
   end
   table.sort(times, function(a, b) return a.y < b.y end)
-  local out, last = {}, nil
+  local out, last, nameless = {}, nil, {}
   for _, a in ipairs(times) do
     if not last or a.y - last >= 30 then
       last = a.y
@@ -1203,8 +1203,21 @@ local function rowNames(items, ff, paneX)
       for _, it in ipairs(col) do
         if it.y >= a.y - 8 and it.y <= a.y + 12 and (not best or it.y < best.y) then best = it end
       end
-      if best then out[#out + 1] = best end
+      if best then out[#out + 1] = best
+      else
+        -- 名前の文字が読めない行（絵文字だけの名前を OCR が何も返さない）も、行として残す。
+        -- 押す所は、ほかの行の名前の列・時刻と同じ高さ（その下の最後のメッセージは使わない）
+        local r = { n = "", text = "", y = a.y + 9, nameless = true }
+        out[#out + 1] = r; nameless[#nameless + 1] = r
+      end
     end
+  end
+  if #nameless > 0 then
+    local xs = {}
+    for _, r in ipairs(out) do if not r.nameless then xs[#xs + 1] = r.x end end
+    table.sort(xs)
+    local x = xs[math.floor((#xs + 1) / 2)] or (ff.x + (paneX - ff.x) * 0.4)
+    for _, r in ipairs(nameless) do r.x = x end
   end
   return out
 end
@@ -1693,39 +1706,64 @@ end
 
 -- 2回読んだ一覧の両方に見える行の高さの差（下へ送ったら正。共通の行が無ければ nil）
 local function rowKey(r) return r.n ~= "" and r.n or ("raw:" .. tostring(r.text)) end
+-- 2回読んだ一覧で、どちらにも1回ずつだけ見える名前の行の高さの差（下へ送ったら正）。
+-- 同じに読める名前（パプリカ🍅 と パプリカ🌶️ を OCR が同じ字に読む）は使わない。
+-- 合う行がいくつもあれば、いちばん多い差。合う行が無ければ nil
 local function shiftOf(before, after)
-  local by = {}
-  for _, r in ipairs(before or {}) do by[rowKey(r)] = r.y end
+  local cb, ca, by = {}, {}, {}
+  for _, r in ipairs(before or {}) do local k = rowKey(r); cb[k] = (cb[k] or 0) + 1; by[k] = r.y end
+  for _, r in ipairs(after or {}) do local k = rowKey(r); ca[k] = (ca[k] or 0) + 1 end
+  local votes, best, bestN = {}, nil, 0
   for _, r in ipairs(after or {}) do
-    if by[rowKey(r)] then return by[rowKey(r)] - r.y end
+    local k = rowKey(r)
+    if cb[k] == 1 and ca[k] == 1 and r.n ~= "" then
+      local d = math.floor(by[k] - r.y + 0.5)
+      votes[d] = (votes[d] or 0) + 1
+      if votes[d] > bestN then best, bestN = d, votes[d] end
+    end
   end
-  return nil
+  return best
+end
+-- 2回読んだ一覧が同じか（行の数と名前の並びが同じで、高さがほぼ同じ）。同じ名前の行が
+-- あっても使える
+local function sameRows(before, after)
+  if #before ~= #after then return false end
+  for i, r in ipairs(before) do
+    if rowKey(r) ~= rowKey(after[i]) or math.abs(r.y - after[i].y) > 4 then return false end
+  end
+  return true
 end
 
 -- 一覧を下へ送る道具。点（pixel）単位で動かなければ行（line）単位に替え、行単位の
 -- 1行の量は最初に動いた時に測って、一覧の高さの 8 割ずつ送る（1行の量はアプリで
--- 違う。実機 10/24 は点単位で一覧が動かなかった）。
--- down(今の行, 読み直す関数) → 送った後の行 / nil（動かない＝一覧の終わりか送れない）
+-- 違う。実機 10/24 は点単位で一覧が動かなかった）。sc.offset に送った量を足していく
+-- （行を一覧の中の位置で見分けるため）。
+-- down(今の行, 読み直す関数) → 送った後の行 / nil, 理由（"end" 動かない＝一覧の終わりか
+-- 送れない / "unreadable" 送った後の一覧が読めない）
 local function newScroller(mx, my, page)
-  local sc = { unit = "pixel", step = page, measured = false, moved = false }
+  local sc = { unit = "pixel", step = page, measured = false, moved = false, offset = 0 }
   function sc.down(before, read)
     for _ = 1, 2 do
       scrollList(mx, my, -sc.step, sc.unit)
       local after = read()
-      if not after then return nil end
-      local d = shiftOf(before, after)
-      if d == nil or d > 4 then
-        sc.moved = true
-        if sc.unit == "line" and not sc.measured and d then
-          sc.step = math.max(1, math.floor(sc.step * page * 0.8 / d))
-          sc.measured = true
+      if not after or #after == 0 then wait(1); after = read() end   -- 描き直しの途中
+      if not after or #after == 0 then return nil, "unreadable" end
+      if not sameRows(before, after) then
+        local d = shiftOf(before, after)
+        if d == nil or d > 4 then
+          sc.moved = true
+          if sc.unit == "line" and not sc.measured and d then
+            sc.step = math.max(1, math.floor(sc.step * page * 0.8 / d))
+            sc.measured = true
+          end
+          sc.offset = sc.offset + (d or page * 0.8)
+          return after
         end
-        return after
       end
-      if sc.unit ~= "pixel" or sc.moved then return nil end
+      if sc.unit ~= "pixel" or sc.moved then return nil, "end" end
       sc.unit, sc.step = "line", L.NAME_LINES        -- 点単位が効かない: 行単位で送り直す
     end
-    return nil
+    return nil, "end"
   end
   function sc.top() scrollList(mx, my, 20000, "pixel"); scrollList(mx, my, L.NAME_LINES_TOP, "line") end
   return sc
@@ -1737,26 +1775,47 @@ end
 -- 読めないトーク（1字・絵文字だけの名前）は、保存名で確かめる（前のトークと同じ
 -- 保存名なら開いていない）。⋮ はヘッダと同じ、検索欄の高さにある。
 -- 戻り値: 保存先 / "dup" / "dup-run" / nil, 失敗
+-- ヘッダの行（検索欄と同じ高さ）の文字だけ。右端のボタン（通話・⋮ など）の辺りは除く
+-- （メニューを閉じる時にヘッダの名前を押すので、ボタンの文字を名前と取り違えない）。
+-- headerRow がヘッダの行に何も見つけられず帯の一番上の文字（メッセージかもしれない）を
+-- 返した時は、それも除く
+local function headerLine(items, paneX, f, winTitle, ff)
+  local cy, out = ff.y + ff.h / 2, {}
+  for _, it in ipairs(headerRow(items, paneX, f, winTitle, ff) or {}) do
+    if math.abs(it.y - cy) <= L.HEADER_DY and it.x < f.x + f.w - 150 then out[#out + 1] = it end
+  end
+  return out
+end
+
 local function exportRow(app, ctx, win, row, prevHeader)
   local f = win:frame()
   local cy = ctx.ff.y + ctx.ff.h / 2
   clickAt(row.x, row.y); wait(0.8)
-  local limit, hdr, hrow, cap = now() + 4, nil, nil, nil
+  -- 一覧で「…」で切れた名前は、その前までがヘッダの名前の頭と合えばよい
+  local rc = countless(row.n)
+  local cut = rc:match("^(.-)…$") or rc:match("^(.-)%.%.%.$")
+  if cut and (utf8.len(cut) or 0) < 3 then cut = nil end
+  local limit, hdr, hl, cap = now() + 4, nil, {}, nil
   while true do
     cap = capture(win, "header")
     local items, oerr = ocr(cap)
     if not items then return fail(ctx, "OCR", "OCR が動かない", cap, oerr) end
-    hrow = headerRow(items, ctx.paneX, f, win:title(), ctx.ff)
-    for _, it in ipairs(hrow or {}) do
-      if countless(it.n) == countless(row.n) or score(row.n, it.n) == 3 then hdr = it; break end
+    hl = headerLine(items, ctx.paneX, f, win:title(), ctx.ff)
+    for _, it in ipairs(hl) do
+      local ic = countless(it.n)
+      if (rc ~= "" and (ic == rc or score(row.n, it.n) == 3)) or (cut and ic:sub(1, #cut) == cut) then
+        hdr = it; break
+      end
     end
-    if not hdr and hrow and hrow[1] and hrow[1].n ~= prevHeader then hdr = hrow[1] end
+    if not hdr and hl[1] and hl[1].n ~= prevHeader then hdr = hl[1] end
     if hdr then break end
     if now() >= limit then
-      if hrow and hrow[1] then
-        return fail(ctx, "トーク確認", "押した行のトークが開かない（ヘッダが押す前のまま）", cap, headerSeen(hrow))
+      -- ヘッダは読めるが押す前のまま。ただしこの実行で最初に開く行（押す前から開いていた
+      -- トークの行かもしれず、一覧とヘッダで文字が違うことがある）は、保存名で確かめる
+      if hl[1] and not ctx.list.firstRow then
+        return fail(ctx, "トーク確認", "押した行のトークが開かない（ヘッダが押す前のまま）", cap, headerSeen(hl))
       end
-      hdr = { x = ctx.paneX + 120, y = cy, n = "", text = "" }   -- ヘッダの名前が読めない
+      hdr = hl[1] or { x = ctx.paneX + 120, y = cy, n = "", text = "" }   -- ヘッダの名前が読めない
       break
     end
     wait(0.5)
@@ -1764,7 +1823,7 @@ local function exportRow(app, ctx, win, row, prevHeader)
   ctx.headerN = hdr.n ~= "" and hdr.n or nil
   note(ctx, "トーク確認", "一覧の行（" .. masked(row.text) .. "）を押して開いた（ヘッダ " ..
     (hdr.text ~= "" and masked(hdr.text) or "読めない。保存名で確かめる") .. "）")
-  local st = { header = { x = hdr.x, y = math.abs(hdr.y - cy) <= L.HEADER_DY and hdr.y or cy, n = hdr.n } }
+  local st = { header = { x = hdr.x, y = hdr.y, n = hdr.n } }
   local ok, e = pressSaveChat(ctx, win, st)
   if not ok then return nil, e end
   local r1, r2 = saveAndMove(ctx, app, st)
@@ -1816,22 +1875,48 @@ local function exportList(app, R)
   local rows, its = read()
   if not rows then return whole("OCR", "OCR が動かない", last) end
   if #rows == 0 then return whole("一覧", "一覧の行が読めない（各行の時刻が見つからない）", last) end
-  local h0 = headerRow(its, paneX, f, win:title(), ctx0.ff)
-  local prevHeader = h0 and h0[1] and h0[1].n or nil
-  local tried, thisRun, n, lastKey = {}, {}, 0, nil
+  local h0 = headerLine(its, paneX, f, win:title(), ctx0.ff)
+  local prevHeader = h0[1] and h0[1].n or nil
+  -- 行は一覧の中の位置で見分ける（名前は同じに読めることがある: パプリカ🍅 と
+  -- パプリカ🌶️）。位置は、見えている高さに送った量を足し、行の間隔で割ったもの。
+  -- 新着で並び替わると位置がずれて、済んだ行をまた開くことがあるが、保存名で
+  -- 同じトークと分かれば保存も数えもしない（dup-run）
+  local gap = 70
+  do
+    local d = {}
+    for i = 2, #rows do if rows[i].y - rows[i - 1].y >= 30 then d[#d + 1] = rows[i].y - rows[i - 1].y end end
+    table.sort(d)
+    if #d > 0 then gap = d[math.floor((#d + 1) / 2)] end
+  end
+  local function keyOf(r) return rowKey(r) .. "@" .. math.floor((r.y + sc.offset) / gap + 0.5) end
+  local tried, thisRun, n, lastKey, anyOpened = {}, {}, 0, nil, false
   while n < LIST_TOP and rows do
     local row
     for _, r in ipairs(rows) do
-      r.key = rowKey(r)                           -- 絵文字だけの名前は norm が空
+      r.key = keyOf(r)
       if not tried[r.key] then row = r; break end
     end
     if not row then
-      rows = sc.down(rows, read)                  -- 見えている行は済んだ: 下へ送る
+      local why
+      rows, why = sc.down(rows, read)             -- 見えている行は済んだ: 下へ送る
+      if not rows and why == "unreadable" then
+        whole("一覧", "下へ送った後の一覧の行が読めない（" .. n .. " 件の後）", last)
+      end
     else
       tried[row.key] = true
       n = n + 1
+      -- 前の行で保存ダイアログが残っていたら（押す所が塞がれて止まった時など）閉じる。
+      -- 出たままだと、以降の行を押しても全部ダイアログに吸われる
+      if findSheet(app) then
+        log("warn: 前の保存ダイアログが残っていたのでキャンセルする")
+        if not cancelSheet(app) then
+          whole("保存ダイアログ", "残っていた保存ダイアログを閉じられない（" .. (n - 1) .. " 件の後）")
+          break
+        end
+      end
       local ctx = { name = "一覧の" .. n .. "番目", tn = row.n, trace = {}, win = win, paneX = paneX,
-                    ff = ctx0.ff, dy = ctx0.dy, list = { saved = R.saved, thisRun = thisRun, lastKey = lastKey } }
+                    ff = ctx0.ff, dy = ctx0.dy,
+                    list = { saved = R.saved, thisRun = thisRun, lastKey = lastKey, firstRow = not anyOpened } }
       local okc, r1, r2 = pcall(exportRow, app, ctx, win, row, prevHeader)
       if not okc then
         if type(r1) == "table" and r1.abort then
@@ -1847,7 +1932,7 @@ local function exportList(app, R)
         end
       end
       prevHeader = ctx.headerN or prevHeader
-      if ctx.saveKey then lastKey = ctx.saveKey end
+      if ctx.saveKey then lastKey = ctx.saveKey; anyOpened = true end
       local shown = ctx.saveName and maskedSave(ctx.saveName) or masked(row.text)
       if r1 == "dup-run" then
         n = n - 1                                   -- 並び替わって同じトークをまた開いた: 数えない
@@ -1863,10 +1948,13 @@ local function exportList(app, R)
                                       note = "→ " .. maskedSave(r1:match("[^/]+$") or r1) }
         R.list[#R.list + 1] = { n = n, name = r1:match("[^/]+$") or r1, how = "保存した" }
       elseif r2 and r2.stage == "メニュー" and tostring(r2.msg):find("見当たらない", 1, true) then
-        -- 「トークを保存」が無いトーク（Keep メモ・公式アカウントなど）は失敗に数えない
+        -- 「トークを保存」が無いトーク（Keep メモ・公式アカウントなど）は、失敗にも 20 件にも
+        -- 数えない。毎日のことなので撮影画像も残さない
+        if r2.imgPath then os.remove(r2.imgPath) end
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
                                       note = "（⋮ に「トークを保存」が無いトークなので飛ばした）" }
-        R.list[#R.list + 1] = { n = n, name = row.text, how = "⋮ に「トークを保存」が無い" }
+        R.list[#R.list + 1] = { n = "-", name = row.text, how = "⋮ に「トークを保存」が無い（数えない）" }
+        n = n - 1
       else
         R.ngN = R.ngN + 1
         log("NG  一覧の " .. n .. " 番目（" .. shown .. "）  " .. describe(r2, true))
@@ -1876,6 +1964,11 @@ local function exportList(app, R)
       end
       wait(0.5)
       rows = read()                                 -- 開いた後の一覧（新着で並び替わることがある）
+      if not rows or #rows == 0 then wait(1); rows = read() end
+      if not rows or #rows == 0 then
+        whole("一覧", "保存した後の一覧の行が読めない（" .. n .. " 件の後）", last)
+        rows = nil
+      end
     end
   end
   if n < LIST_TOP then
@@ -2108,7 +2201,11 @@ local function readResult()
       if k == "day" then r.day = v
       elseif k == "version" then r.version = v
       elseif k == "ng" then r.ng = tonumber(v) or 0
-      elseif k == "ok" then r.ok[v] = true
+      elseif k == "ok" then
+        -- 前の版（名前で探していた版）は TARGETS の名前で残していた。一覧の上から順の版は
+        -- 保存名（loose）で見るので、同じトークと分かるように両方の形で持つ
+        r.ok[v] = true
+        for _, w in ipairs({ v, v .. "とのトーク", v .. "のトーク", "Chat with " .. v }) do r.ok[loose(w, true)] = true end
       elseif k == "failed" then r.failed = v
       elseif k == "stopped" then r.stopped = v end
     end
@@ -2395,7 +2492,7 @@ local function writeSaved(R)
               string.format("# 一覧の上から %d 件を開いた（上限 %d 件）%s", R.rowsTried or #R.list, LIST_TOP,
                 R.stopped and ("。中断: " .. R.stopped) or ""), "" }
   for _, e in ipairs(R.list) do
-    t[#t + 1] = string.format("%d. %s\t%s", e.n, tostring(e.name):gsub("[%c]", " "), e.how)
+    t[#t + 1] = string.format("%s. %s\t%s", tostring(e.n), (tostring(e.name):gsub("[%c]", " ")), e.how)
   end
   local f = io.open(DEBUG_DIR .. "/names.txt", "w")
   if f then f:write(table.concat(t, "\n") .. "\n"); f:close() end
