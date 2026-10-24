@@ -622,6 +622,8 @@ hs = {
       -- 本物は量を整数に直して読む（小数は 0 になり、動かない）
       local amount = math.tointeger(off[2])
       if not amount then W.fractionalScroll = true; return end
+      -- 最初に下へ送った時に、いくつ開いていたか（見えている最後の行の番号を知るため）
+      if off[2] < 0 and not W.opensAtFirstScroll and #W.openLog > 0 then W.opensAtFirstScroll = #W.openLog end
       if W.sheet then return end                     -- シートが出ている間は一覧も動かない
       -- 点（pixel）単位・行（line）単位のどちらが効くかはアプリしだい（実機 10/24: pixel で動かない）
       if (unit or "line") == "pixel" and W.knobs.pixelScrollIgnored then return end
@@ -1758,7 +1760,7 @@ test("「トークを保存」が無いトーク（Keep メモ など）は飛�
   M._t.runExport(true)
   check(#outFiles() == 3 and not has("トーク2番"), "残りは保存した: " .. table.concat(outFiles(), ","))
   check(line(heartbeat(), "ng: 0"), "失敗に数えない:\n" .. heartbeat())
-  check(namesTxt():find("-. トーク2番\t⋮ に「トークを保存」が無い", 1, true), "names.txt に飛ばした理由:\n" .. namesTxt())
+  check(namesTxt():find("2. トーク2番\t⋮ に「トークを保存」が無い", 1, true), "names.txt に飛ばした理由:\n" .. namesTxt())
   safe()
 end)
 
@@ -1852,8 +1854,78 @@ test("「トークを保存」が無いトークを閉じる時は、ヘッダ�
   check(#outFiles() == 2, "ほかは保存: " .. table.concat(outFiles(), ","))
   local imgs = 0
   for _, f in ipairs(lsdir(DEBUG)) do if f:find("メニュー", 1, true) then imgs = imgs + 1 end end
-  check(imgs == 0, "飛ばしたトークの撮影画像は残さない: " .. imgs)
+  check(imgs == 1, "飛ばしたトークの撮影画像は最初の分だけ残す: " .. imgs)
   safe()
+end)
+
+test("保存したばかりのトークに新着が来て一番上に来ても、失敗にも 20 件にも数えない", function()
+  for _, k in ipairs({ { 4, "トーク2番" }, { 7, "トーク3番" } }) do   -- k[1] 回目に押した時に k[2] に新着
+    reset({ chats = numbered(30), knobs = { reorderAtClick = k[1], reorderName = k[2] } })
+    local M = load()
+    local r = M._t.runExport(true)
+    check(r == "done" and #outFiles() == 20 and has("トーク20番"), k[2] .. ": 20 件: " .. table.concat(outFiles(), ","))
+    check(line(heartbeat(), "ok: 20") and line(heartbeat(), "ng: 0"), k[2] .. ": 失敗にしない:\n" .. heartbeat())
+    safe()
+  end
+end)
+
+test("見えている最後の行で保存ダイアログが残っても、閉じてから下へ送って続ける", function()
+  reset({ chats = numbered(30) })
+  load()._t.runExport(true)
+  local last = W.opensAtFirstScroll                -- 見えている最後の行（下へ送る前に開いた数）
+  check(last and last >= 5, "見えている行の数: " .. tostring(last))
+  for _, k in ipairs({ last - 1, last }) do
+    reset({ chats = numbered(30), knobs = { frontLostOnSheetN = k } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    check(line(hb, "ok: 19") and line(hb, "ng: 1") and #outFiles() == 19,
+      k .. " 件目で止まっても残りを保存: " .. table.concat(outFiles(), ",") .. "\n" .. hb)
+    check(not W.sheet, "保存ダイアログは閉じた")
+  end
+end)
+
+test("「トークを保存」が無いトークが続いたら（読み方が変わった？）、一覧の終わりまで回らずに止めて失敗に書く", function()
+  local list = numbered(30)
+  for i = 1, 30 do list[i].menuItems = { "通知オフ", "トーク履歴を削除" } end
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  check(#W.openLog == 8, "8 件で止めた: " .. #W.openLog)
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("「トークを保存」が無いトークが 8 件続いた", 1, true), "失敗に書く:\n" .. hb)
+  local imgs = 0
+  for _, f in ipairs(lsdir(DEBUG)) do if f:find("番目_メニュー", 1, true) then imgs = imgs + 1 end end
+  check(imgs == 2, "飛ばした行の撮影画像は最初の2件だけ: " .. imgs)
+  safe()
+end)
+
+test("最初の行を押しても開かず、前から開いていた別のトークのままなら、それを代わりに保存しない", function()
+  local list = numbered(5)
+  list[1].noOpen = true
+  reset({ chats = list })
+  W.open = "トーク4番"                             -- 押す前から4番目のトークが開いている
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("一覧の1番目: [トーク確認]", 1, true), "1番目は開かなかった失敗:\n" .. hb)
+  check(not has("トーク1番") and has("トーク4番") and #outFiles() == 4, "4番は自分の行で1回だけ: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("今日の結果に残す保存済みの名前は、読み込み直しても増えない", function()
+  reset({ chats = chats({ "Berry", "直承Jikisho" }) })
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  writefile(REPO .. "/mac/.last_result", "day=" .. TODAY .. "\nversion=v4.1-c7f58660\nng=1\nok=Berry\n")
+  for _ = 1, 3 do
+    local M = load()
+    W.lastHID = T - 999
+    at9am(function() M._t.maybeRun() end)
+  end
+  local res = readfile(REPO .. "/mac/.last_result") or ""
+  local n = select(2, res:gsub("\nok=", ""))
+  check(n == 2, "保存済みは2件のまま: " .. n .. "\n" .. res)
+  check(not res:find("とのトーク", 1, true) and not res:find("chatwith", 1, true), "別名は書かない:\n" .. res)
 end)
 
 test("前の版（名前で探していた版）が今日保存したトークは、新しい版でのやり直しで保存し直さない", function()
@@ -1876,10 +1948,10 @@ test("ヘッダが押す前のままなら、前のトークが「トークを�
   local M = load()
   M._t.runExport(true)
   local hb = heartbeat()
-  -- 「トークを保存」が無いトークは数えないので、トーク3番の行は2件目
-  check(line(hb, "ng: 1") and hb:find("一覧の2番目: [トーク確認]", 1, true), "トーク3番の行は開かなかった失敗:\n" .. hb)
-  check(namesTxt():find("\n2. トーク3番\t失敗: [トーク確認]", 1, true) and namesTxt():find("\n-. トーク2番\t", 1, true),
-    "names.txt にも失敗と書く（飛ばした行は番号なし）:\n" .. namesTxt())
+  check(line(hb, "ng: 1") and hb:find("一覧の3番目: [トーク確認]", 1, true), "トーク3番の行は開かなかった失敗:\n" .. hb)
+  check(namesTxt():find("\n3. トーク3番\t失敗: [トーク確認]", 1, true)
+        and namesTxt():find("\n2. トーク2番\t⋮ に「トークを保存」が無い（20 件に数えない）", 1, true),
+    "names.txt にも失敗と書く:\n" .. namesTxt())
   safe()
 end)
 
@@ -1895,15 +1967,15 @@ test("ヘッダの名前が読めないトーク（1字・絵文字だけ）で�
 end)
 
 test("押した行で、この実行でもう保存したトークがまた開いたら、保存せず 20 件にも数えない", function()
-  local list = numbered(5)
+  local list = numbered(21)
   list[4].opens = "トーク2番"                      -- 4番目の行を押すと（3番目から変わって）2番目のトークが開く
   reset({ chats = list })
   local M = load()
   M._t.runExport(true)
-  local nt = namesTxt()
-  check(nt:find("\n3. [LINE]トーク3番_", 1, true) and nt:find("\n4. [LINE]トーク5番_", 1, true),
-    "同じトークは数えない（5番が4件目）:\n" .. nt)
-  check(#outFiles() == 4 and line(heartbeat(), "ng: 0"), "保存は4件・失敗にしない: " .. table.concat(outFiles(), ","))
+  -- 同じトークは 20 件に数えないので、21 番目の行まで進んで 20 件保存する
+  check(#outFiles() == 20 and has("トーク21番") and not has("トーク4番"),
+    "同じトークは数えない: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ng: 0"), "失敗にしない:\n" .. heartbeat())
   safe()
 end)
 

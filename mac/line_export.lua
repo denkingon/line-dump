@@ -97,6 +97,7 @@ local L = {
   NAME_LINES      = 3,    -- 名前を集める時、点単位で一覧が動かなければ行単位でこの量ずつ送る
   NAME_LINES_MAX  = 48,   -- 行単位で新しい名前が出ない時に増やす上限
   NAME_LINES_TOP  = 3000, -- 一番上へ戻す時の行単位の量
+  SKIP_MAX        = 8,    -- 「トークを保存」が無いトークがこの数続いたら、読み方を疑って止める
   -- 今のトーク名を集める時に読む一覧のページ数の上限（1ページ＝一覧の高さ分）
   NAME_PAGES      = 15,
 }
@@ -1512,8 +1513,22 @@ local function saveAndMove(ctx, app, st)
     body = body:gsub("^%[LINE%]", "")
     local key = loose(body, true)
     ctx.saveKey, ctx.saveName = key, cur
-    local same = ctx.list.lastKey ~= nil and key == ctx.list.lastKey
-    local seenRun, seenDay = ctx.list.thisRun[key], ctx.list.saved[key]
+    -- 前のトークと同じ保存名: 行の名前とヘッダが合っていたなら、新着で一番上に来た同じ
+    -- トークをまた開いた（"dup-run"）。そうでなければ押した行が開かず前のトークのまま（"same"）。
+    -- 最初の行でヘッダが変わらなかった時は、保存名が行の名前と合わなければ開いていない
+    local same = ctx.list.lastKey ~= nil and key == ctx.list.lastKey and not ctx.list.rowMatched
+    local vr = ctx.list.verifyRow
+    if vr and vr ~= "" then
+      -- 行の名前（OCR）と保存名が同じトークか: 同じ・どちらかがもう一方を含む・「…」の前まで
+      -- 合う（似ているだけの「トーク1番」と「トーク4番」は別）
+      local bn, rc = countless(norm(body)), countless(vr)
+      local cut = rc:match("^(.-)…$") or rc:match("^(.-)%.%.%.$")
+      local ok = bn == rc or (rc ~= "" and bn:find(rc, 1, true)) or (bn ~= "" and rc:find(bn, 1, true))
+                 or (cut and (utf8.len(cut) or 0) >= 3 and bn:sub(1, #cut) == cut)
+      if not ok then same = true end
+    end
+    local seenRun = ctx.list.thisRun[key]
+    local seenDay = ctx.list.saved[key] or (ctx.list.alias and ctx.list.alias[key])
     if same or seenRun or seenDay then
       if not cancelSheet(app) then
         return failSheet(ctx, app, "保存ダイアログ", "保存しないトークの保存ダイアログを閉じられない")
@@ -1741,7 +1756,8 @@ end
 -- down(今の行, 読み直す関数) → 送った後の行 / nil, 理由（"end" 動かない＝一覧の終わりか
 -- 送れない / "unreadable" 送った後の一覧が読めない）
 local function newScroller(mx, my, page)
-  local sc = { unit = "pixel", step = page, measured = false, moved = false, offset = 0 }
+  -- 点単位も一覧の高さの 8 割ずつ（前後で 3〜4 行重なり、送った量を測りやすい）
+  local sc = { unit = "pixel", step = math.floor(page * 0.8), measured = false, moved = false, offset = 0, pxPerLine = nil }
   function sc.down(before, read)
     for _ = 1, 2 do
       scrollList(mx, my, -sc.step, sc.unit)
@@ -1752,11 +1768,14 @@ local function newScroller(mx, my, page)
         local d = shiftOf(before, after)
         if d == nil or d > 4 then
           sc.moved = true
+          -- 送った量が測れない時（両方に1回ずつ見える名前の行が無い）は、送ったつもりの量
+          local sent = (sc.unit == "pixel" and sc.step) or (sc.pxPerLine and sc.step * sc.pxPerLine) or page * 0.8
           if sc.unit == "line" and not sc.measured and d then
-            sc.step = math.max(1, math.floor(sc.step * page * 0.8 / d))
+            sc.pxPerLine = d / sc.step
+            sc.step = math.max(1, math.floor(page * 0.8 / sc.pxPerLine))
             sc.measured = true
           end
-          sc.offset = sc.offset + (d or page * 0.8)
+          sc.offset = sc.offset + (d or sent)
           return after
         end
       end
@@ -1804,17 +1823,19 @@ local function exportRow(app, ctx, win, row, prevHeader)
     for _, it in ipairs(hl) do
       local ic = countless(it.n)
       if (rc ~= "" and (ic == rc or score(row.n, it.n) == 3)) or (cut and ic:sub(1, #cut) == cut) then
-        hdr = it; break
+        hdr = it; ctx.list.rowMatched = true; break
       end
     end
     if not hdr and hl[1] and hl[1].n ~= prevHeader then hdr = hl[1] end
     if hdr then break end
     if now() >= limit then
       -- ヘッダは読めるが押す前のまま。ただしこの実行で最初に開く行（押す前から開いていた
-      -- トークの行かもしれず、一覧とヘッダで文字が違うことがある）は、保存名で確かめる
+      -- トークの行かもしれず、一覧とヘッダで文字が違うことがある）は、保存名が行の名前と
+      -- 合うかで確かめる（合わなければ、押す前から開いていた別のトークなので保存しない）
       if hl[1] and not ctx.list.firstRow then
         return fail(ctx, "トーク確認", "押した行のトークが開かない（ヘッダが押す前のまま）", cap, headerSeen(hl))
       end
+      if hl[1] then ctx.list.verifyRow = row.n end
       hdr = hl[1] or { x = ctx.paneX + 120, y = cy, n = "", text = "" }   -- ヘッダの名前が読めない
       break
     end
@@ -1889,8 +1910,18 @@ local function exportList(app, R)
     if #d > 0 then gap = d[math.floor((#d + 1) / 2)] end
   end
   local function keyOf(r) return rowKey(r) .. "@" .. math.floor((r.y + sc.offset) / gap + 0.5) end
-  local tried, thisRun, n, lastKey, anyOpened = {}, {}, 0, nil, false
+  local tried, thisRun, n, lastKey, anyOpened, idx = {}, {}, 0, nil, false, 0
+  local skipsInRow = 0                              -- 「トークを保存」が無いトークが続いた数
   while n < LIST_TOP and rows do
+    -- 前の行で保存ダイアログが残っていたら（押す所が塞がれて止まった時など）閉じる。
+    -- 出たままだと、以降の行を押しても一覧を送っても全部ダイアログに吸われる
+    if findSheet(app) then
+      log("warn: 前の保存ダイアログが残っていたのでキャンセルする")
+      if not cancelSheet(app) then
+        whole("保存ダイアログ", "残っていた保存ダイアログを閉じられない（" .. n .. " 件の後）")
+        break
+      end
+    end
     local row
     for _, r in ipairs(rows) do
       r.key = keyOf(r)
@@ -1904,23 +1935,16 @@ local function exportList(app, R)
       end
     else
       tried[row.key] = true
-      n = n + 1
-      -- 前の行で保存ダイアログが残っていたら（押す所が塞がれて止まった時など）閉じる。
-      -- 出たままだと、以降の行を押しても全部ダイアログに吸われる
-      if findSheet(app) then
-        log("warn: 前の保存ダイアログが残っていたのでキャンセルする")
-        if not cancelSheet(app) then
-          whole("保存ダイアログ", "残っていた保存ダイアログを閉じられない（" .. (n - 1) .. " 件の後）")
-          break
-        end
-      end
-      local ctx = { name = "一覧の" .. n .. "番目", tn = row.n, trace = {}, win = win, paneX = paneX,
+      n = n + 1                                     -- 20 件に数える数（飛ばした・同じトークは戻す）
+      idx = idx + 1                                 -- 開いた行の順番（診断と heartbeat の「何番目」）
+      local ctx = { name = "一覧の" .. idx .. "番目", tn = row.n, trace = {}, win = win, paneX = paneX,
                     ff = ctx0.ff, dy = ctx0.dy,
-                    list = { saved = R.saved, thisRun = thisRun, lastKey = lastKey, firstRow = not anyOpened } }
+                    list = { saved = R.saved, alias = R.alias, thisRun = thisRun, lastKey = lastKey,
+                             firstRow = not anyOpened } }
       local okc, r1, r2 = pcall(exportRow, app, ctx, win, row, prevHeader)
       if not okc then
         if type(r1) == "table" and r1.abort then
-          R.stopped = r1.abort .. "（一覧の " .. n .. " 番目で中断）"
+          R.stopped = r1.abort .. "（一覧の " .. idx .. " 番目で中断）"
           R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace,
                                         e = { stage = "中断", msg = r1.abort } }
           return
@@ -1934,33 +1958,42 @@ local function exportList(app, R)
       prevHeader = ctx.headerN or prevHeader
       if ctx.saveKey then lastKey = ctx.saveKey; anyOpened = true end
       local shown = ctx.saveName and maskedSave(ctx.saveName) or masked(row.text)
+      local isSkip = not r1 and r2 and r2.stage == "メニュー" and tostring(r2.msg):find("見当たらない", 1, true)
+      if not isSkip then skipsInRow = 0 end
       if r1 == "dup-run" then
         n = n - 1                                   -- 並び替わって同じトークをまた開いた: 数えない
       elseif r1 == "dup" then
         R.okN = R.okN + 1
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace, note = "（今日もう保存済み）" }
-        R.list[#R.list + 1] = { n = n, name = ctx.saveName or row.text, how = "今日もう保存済み" }
+        R.list[#R.list + 1] = { n = idx, name = ctx.saveName or row.text, how = "今日もう保存済み" }
       elseif r1 then
         R.okN = R.okN + 1
         R.saved[ctx.saveKey] = true; thisRun[ctx.saveKey] = true
-        log("OK  一覧の " .. n .. " 番目 → " .. shown)
+        log("OK  一覧の " .. idx .. " 番目 → " .. shown)
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
                                       note = "→ " .. maskedSave(r1:match("[^/]+$") or r1) }
-        R.list[#R.list + 1] = { n = n, name = r1:match("[^/]+$") or r1, how = "保存した" }
-      elseif r2 and r2.stage == "メニュー" and tostring(r2.msg):find("見当たらない", 1, true) then
+        R.list[#R.list + 1] = { n = idx, name = r1:match("[^/]+$") or r1, how = "保存した" }
+      elseif isSkip then
         -- 「トークを保存」が無いトーク（Keep メモ・公式アカウントなど）は、失敗にも 20 件にも
-        -- 数えない。毎日のことなので撮影画像も残さない
-        if r2.imgPath then os.remove(r2.imgPath) end
+        -- 数えない。毎日のことなので撮影画像は最初の2件だけ残す。続けて SKIP_MAX 件あれば
+        -- 「トークを保存」の読み方が変わったのかもしれないので、止めて失敗に書く
+        R.skipN = R.skipN + 1; skipsInRow = skipsInRow + 1
+        if r2.imgPath and R.skipN > 2 then os.remove(r2.imgPath) end
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
                                       note = "（⋮ に「トークを保存」が無いトークなので飛ばした）" }
-        R.list[#R.list + 1] = { n = "-", name = row.text, how = "⋮ に「トークを保存」が無い（数えない）" }
+        R.list[#R.list + 1] = { n = idx, name = row.text, how = "⋮ に「トークを保存」が無い（20 件に数えない）" }
         n = n - 1
+        if skipsInRow >= L.SKIP_MAX then
+          whole("メニュー", "「トークを保存」が無いトークが " .. skipsInRow .. " 件続いた（メニューの読み方を確かめる）",
+            nil, r2.img and ("最初の画像: " .. r2.img) or nil)
+          break
+        end
       else
         R.ngN = R.ngN + 1
-        log("NG  一覧の " .. n .. " 番目（" .. shown .. "）  " .. describe(r2, true))
+        log("NG  一覧の " .. idx .. " 番目（" .. shown .. "）  " .. describe(r2, true))
         R.ngLines[#R.ngLines + 1] = ctx.name .. ": " .. describe(r2)
         R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace, e = r2 }
-        R.list[#R.list + 1] = { n = n, name = ctx.saveName or row.text, how = "失敗: " .. describe(r2) }
+        R.list[#R.list + 1] = { n = idx, name = ctx.saveName or row.text, how = "失敗: " .. describe(r2) }
       end
       wait(0.5)
       rows = read()                                 -- 開いた後の一覧（新着で並び替わることがある）
@@ -1971,10 +2004,13 @@ local function exportList(app, R)
       end
     end
   end
+  if findSheet(app) and not cancelSheet(app) then
+    whole("保存ダイアログ", "最後に残った保存ダイアログを閉じられない")
+  end
   if n < LIST_TOP then
     note(ctx0, "一覧", n .. " 件で一覧の終わり（" .. (sc.moved and "下へ送って読んだ" or "一覧が動かない") .. "）")
   end
-  R.rowsTried = n
+  R.rowsTried = idx
 end
 
 -- 失敗した時の「次にすること」（コンソール用）。この Mac で人が手を動かせば
@@ -2205,7 +2241,8 @@ local function readResult()
         -- 前の版（名前で探していた版）は TARGETS の名前で残していた。一覧の上から順の版は
         -- 保存名（loose）で見るので、同じトークと分かるように両方の形で持つ
         r.ok[v] = true
-        for _, w in ipairs({ v, v .. "とのトーク", v .. "のトーク", "Chat with " .. v }) do r.ok[loose(w, true)] = true end
+        r.alias = r.alias or {}
+        for _, w in ipairs({ v, v .. "とのトーク", v .. "のトーク", "Chat with " .. v }) do r.alias[loose(w, true)] = true end
       elseif k == "failed" then r.failed = v
       elseif k == "stopped" then r.stopped = v end
     end
@@ -2475,7 +2512,8 @@ end
 -- 済んだものを飛ばして残りから進める（毎回1件目からだと後ろが届かない）。
 local DONE = (function()
   local r = readResult()
-  return { day = r.day, ok = r.day == today() and r.ok or {} }
+  local same = r.day == today()
+  return { day = r.day, ok = same and r.ok or {}, alias = same and r.alias or {} }
 end)()
 
 -- 全件を書き出す。auto=true は無人の自動実行。戻り値（2つ目は理由）:
@@ -2489,8 +2527,8 @@ local function writeSaved(R)
   local t = { "# 今日書き出したトーク（普段のトークの一覧の上から）",
               "time: " .. os.date("%Y-%m-%d %H:%M:%S"), "version: " .. VERSION,
               "# 非公開（Dropbox）。トーク名だけで、会話の中身は入れていない",
-              string.format("# 一覧の上から %d 件を開いた（上限 %d 件）%s", R.rowsTried or #R.list, LIST_TOP,
-                R.stopped and ("。中断: " .. R.stopped) or ""), "" }
+              string.format("# 一覧の上から %d 行を開いた（保存は %d 件まで。「トークを保存」が無くて飛ばした %d 件は数えない）%s",
+                R.rowsTried or #R.list, LIST_TOP, R.skipN or 0, R.stopped and ("。中断: " .. R.stopped) or ""), "" }
   for _, e in ipairs(R.list) do
     t[#t + 1] = string.format("%s. %s\t%s", tostring(e.n), (tostring(e.name):gsub("[%c]", " ")), e.how)
   end
@@ -2524,10 +2562,11 @@ local function runExport(auto)
     if not auto then hs.alert.show("手が動いているので始めなかった。手を離してからもう一度 ⌘⌥⌃L", 4) end
     return "busy", "手が動いていた"
   end
-  if DONE.day ~= today() then DONE = { day = today(), ok = {} } end
+  if DONE.day ~= today() then DONE = { day = today(), ok = {}, alias = {} } end
   -- 一覧の上から順に書き出す。今日の前の実行で保存したトーク（DONE.ok。保存名）は
   -- 保存し直さない（中断の後のやり直し・新しい版でのやり直し）
-  local R = { okN = 0, ngN = 0, ngLines = {}, results = {}, list = {}, saved = DONE.ok }
+  local R = { okN = 0, ngN = 0, ngLines = {}, results = {}, list = {}, saved = DONE.ok, alias = DONE.alias or {},
+              skipN = 0 }
   local okl, el = pcall(exportList, app, R)
   if not okl then
     if type(el) == "table" and el.abort then
@@ -2558,7 +2597,8 @@ local function runExport(auto)
     res = { day = DONE.day, version = VERSION, ng = ngN, ok = DONE.ok }
   end
   writeResult(res)
-  writeHeartbeat(okN, ngN, ngLines, stopped and ("中断: " .. stopped))
+  writeHeartbeat(okN, ngN, ngLines, (stopped and ("中断: " .. stopped))
+    or ((R.skipN or 0) > 0 and ("「トークを保存」が無いトークを " .. R.skipN .. " 件飛ばした")) or nil)
   writeReport((auto and "自動実行" or "手動実行") .. (stopped and "・中断" or ""), results)
 
   local pushed = runSync()
