@@ -261,7 +261,7 @@ local function click(pt)
        and pt.x > L.field.x - 60 and pt.x < L.field.x + L.field.w + 10 then
       W.openLog[#W.openLog + 1] = c.name
       if c.noOpen then return end                  -- 押しても開かない行
-      W.open = opened(c); W.openedAt = T
+      W.open = c.opens or opened(c); W.openedAt = T  -- opens: 押すと別のトークが開く行
       W.focus = "input"
       -- 新着で別のトークが一覧の一番上に来る（reorderAtClick 回目に押した後）
       if W.knobs.reorderAtClick == W.clickN then
@@ -1728,6 +1728,8 @@ test("点単位で一覧が動かなくても、行単位で送って 20 件目�
     M._t.runExport(true)
     check(#outFiles() == 20 and has("トーク20番") and not has("トーク21番"),
       "1行=" .. scale .. "pt でも 20 件: " .. table.concat(outFiles(), ","))
+    -- 1行の量を測って一覧の高さの 8 割ずつ送る（1行ずつ少しずつ送り続けない）
+    check((W.scrolls or 0) <= 12, "1行=" .. scale .. "pt: 送った回数 " .. tostring(W.scrolls))
     safe()
   end
 end)
@@ -1762,6 +1764,43 @@ test("押しても開かない行は、その行だけ失敗にして次へ進�
   check(#outFiles() == 3 and not has("トーク3番"), "ほかは保存した: " .. table.concat(outFiles(), ","))
   local hb = heartbeat()
   check(line(hb, "ng: 1") and hb:find("一覧の3番目: [トーク確認]", 1, true), "その行だけ失敗:\n" .. hb)
+  safe()
+end)
+
+test("ヘッダが押す前のままなら、前のトークが「トークを保存」の無いトークでも、その行は開かなかった失敗にする", function()
+  local list = numbered(4)
+  list[2].menuItems = { "通知オフ", "トーク履歴を削除" }   -- Keep メモ など（保存名が分からない）
+  list[3].noOpen = true
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("一覧の3番目: [トーク確認]", 1, true), "3番目は開かなかった失敗:\n" .. hb)
+  check(namesTxt():find("3. トーク3番\t失敗: [トーク確認]", 1, true), "names.txt にも失敗と書く:\n" .. namesTxt())
+  safe()
+end)
+
+test("ヘッダの名前が読めないトーク（1字・絵文字だけ）で押した行が開かなければ、前と同じ保存名で気づいて失敗にする", function()
+  reset({ chats = { { name = "母" }, { name = "🐱", noOpen = true }, { name = "Berry" } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ok: 2") and line(hb, "ng: 1") and hb:find("一覧の2番目: [トーク確認]", 1, true),
+    "2番目は失敗（黙って飛ばさない）:\n" .. hb)
+  check(has("母") and has("Berry") and #outFiles() == 2, "ほかは保存: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("押した行で、この実行でもう保存したトークがまた開いたら、保存せず 20 件にも数えない", function()
+  local list = numbered(5)
+  list[4].opens = "トーク2番"                      -- 4番目の行を押すと（3番目から変わって）2番目のトークが開く
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  local nt = namesTxt()
+  check(nt:find("\n3. [LINE]トーク3番_", 1, true) and nt:find("\n4. [LINE]トーク5番_", 1, true),
+    "同じトークは数えない（5番が4件目）:\n" .. nt)
+  check(#outFiles() == 4 and line(heartbeat(), "ng: 0"), "保存は4件・失敗にしない: " .. table.concat(outFiles(), ","))
   safe()
 end)
 
