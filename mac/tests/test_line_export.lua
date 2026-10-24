@@ -1740,32 +1740,6 @@ test("名前集め: 点・行単位とも一覧が動かない時は、終わり
   check(nt:find("\nトーク1番\n", 1, true) and not nt:find("\nトーク40番\n", 1, true), "最初の画面の分だけ")
 end)
 
-test("保存名・ヘッダが合わずに止めた時は、本当の名前を非公開の names_seen.txt にだけ控える", function()
-  reset({ chats = chats({ { name = "いりべひでなり" }, { name = "Berry" } }),
-          knobs = { defaultName = "[LINE]いりべひでなり先生.txt" } })
-  local M = load()
-  local ok, e = pcall(M._t.runExport, true)
-  local seen = readfile(DEBUG .. "/names_seen.txt") or ""
-  check(seen:find("\tいりべひでなり\t保存名\t[LINE]いりべひでなり先生.txt\n", 1, true), "保存名を控えた:\n" .. seen)
-  check(seen:find("会話の中身は入れていない", 1, true), "名前だけと書く")
-  check(not heartbeat():find("先生", 1, true), "heartbeat（公開）には書かない:\n" .. heartbeat())
-  check(not (readfile(DEBUG .. "/latest.txt") or ""):find("先生", 1, true), "診断ファイルは伏せ字のまま")
-  for _, l in ipairs(W.logs) do check(not l:find("先生", 1, true), "コンソールにも出さない: " .. l) end
-  -- ヘッダが違うトークが開いた時（検索結果のメッセージの行を押した など）
-  reset({ chats = chats({ { name = "il 石川ありがとう", ocrHeader = "石川さんの別グループ" } }) })
-  M = load()
-  local ok2, e2 = exportOne("il 石川ありがとう")
-  check(not ok2 and e2.stage == "トーク確認", "ヘッダで止めた: " .. tostring(e2 and e2.stage))
-  seen = readfile(DEBUG .. "/names_seen.txt") or ""
-  check(seen:find("\til 石川ありがとう\tヘッダ\t石川さんの別グループ\n", 1, true), "ヘッダの名前を控えた:\n" .. seen)
-  -- 古いものから消して 200 行まで
-  for i = 1, 210 do M._t.noteSeen("Berry", "保存名", "x" .. i) end
-  local n = 0
-  for l in readfile(DEBUG .. "/names_seen.txt"):gmatch("[^\n]+") do if not l:match("^#") then n = n + 1 end end
-  check(n == 200, "200 行だけ残す: " .. n)
-  check(not readfile(DEBUG .. "/names_seen.txt"):find("\tx10\n", 1, true), "古いものから消した")
-end)
-
 test("名前が似ているだけのトーク（Berry と Berry2）は書き出さず、names.txt に候補として書くだけ", function()
   reset()
   local M = withTargets({ { name = "直承Jikisho" }, { name = "Berry2" } })

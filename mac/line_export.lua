@@ -1103,36 +1103,6 @@ local function headerSeen(hrow)
   return string.format("ヘッダ行（y=%.0f）: %s", hrow[1].y, table.concat(t, " "))
 end
 
--- TARGETS を開いて、保存名やヘッダが合わずに止めた時の本当の名前の控え。
--- 非公開の Dropbox（names_seen.txt）にだけ書く（診断ファイルとコンソールは伏せ字のまま）。
--- 名前が変わったトークの TARGETS を、人に聞かずに直すため。トーク名だけで、
--- 会話の中身は入れない
-local SEEN_PATH, SEEN_KEEP = DEBUG_DIR .. "/names_seen.txt", 200
-local function noteSeen(target, kind, name)
-  pcall(function()
-    name = tostring(name or ""):gsub("[%c]", " ")
-    if name:match("^%s*$") then return end
-    hs.fs.mkdir(DEBUG_DIR)
-    local lines = {}
-    for l in (readAll(SEEN_PATH) or ""):gmatch("[^\n]+") do
-      if not l:match("^#") then lines[#lines + 1] = l end
-    end
-    lines[#lines + 1] = os.date("%Y-%m-%d %H:%M:%S") .. "\t" .. target .. "\t" .. kind .. "\t" .. name
-    local f = io.open(SEEN_PATH, "w")
-    if not f then return end
-    f:write("# TARGETS を開いた時に、保存名やヘッダが合わずに止めた本当の名前（新しいものが下）\n" ..
-            "# 非公開（Dropbox）。トーク名だけで、会話の中身は入れていない\n" ..
-            "# 時刻\tTARGETS の名前\t見えた所\t見えた名前\n")
-    f:write(table.concat(lines, "\n", math.max(1, #lines - SEEN_KEEP + 1)) .. "\n")
-    f:close()
-  end)
-end
-local function rawHeader(hrow)
-  local t = {}
-  for _, it in ipairs(hrow or {}) do t[#t + 1] = it.text end
-  return table.concat(t, " ")
-end
-
 -- 押した行のトークが開いたか、ヘッダを読んで確かめる。開くのに時間が
 -- かかることがあるので、4秒までは読み直す。
 -- 戻り値: ヘッダのトーク名（OCR の1件）/ nil, "ocr" か "mismatch", 撮影, 詳細
@@ -1152,10 +1122,7 @@ local function confirmHeader(ctx, win, ff, paneX, row, top)
     end
     local hdr = headerMatches(hrow, ctx.tn, row, top)
     if hdr then return hdr end
-    if now() >= limit then
-      noteSeen(ctx.name, "ヘッダ", rawHeader(hrow))
-      return nil, "mismatch", cap, headerSeen(hrow)
-    end
+    if now() >= limit then return nil, "mismatch", cap, headerSeen(hrow) end
     wait(0.5)
   end
 end
@@ -1668,7 +1635,6 @@ local function saveAndMove(ctx, app, st)
   end
   -- 既定名は「[LINE]<トーク名>.txt」。ここでも別トークでないか確かめる
   if not nameMatches(cur, ctx.name) then
-    noteSeen(ctx.name, "保存名", cur)
     local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur))
     e.otherChat = true                            -- 別のトークだった（次の候補があれば試す）
     return nil, e
@@ -1683,7 +1649,6 @@ local function saveAndMove(ctx, app, st)
     local others = false
     for k in pairs(ctx.maybe) do if k ~= cur then others = true end end
     if targetHasEmoji or ctx.more or others then
-      noteSeen(ctx.name, "保存名（絵文字・記号だけ違う）", cur)
       local _, e = failSheet(ctx, app, "保存ダイアログ", "保存名がトーク名と合わない", "保存名: " .. maskedSave(cur) ..
         (targetHasEmoji and "（絵文字・記号が TARGETS と違う）"
                         or "（絵文字・記号だけ違うトークが他にもありうる。TARGETS に絵文字まで書くと決められる）"))
@@ -1956,6 +1921,7 @@ local function runSync()
   local r
   if out:find("push 完了", 1, true) then r = "push済"
   elseif out:find("変更なし", 1, true) or out:find("取り込む txt が無い", 1, true) then r = "変更なし"
+  elseif out:find("公開になっているので", 1, true) then r = "GitHub が公開なので push しない"
   else r = "push できず" end
   log("sync: " .. r .. (r == "push できず" and ("（理由は " .. tidy(REPO) .. "/mac/sync.log）") or ""))
   return r
@@ -2850,7 +2816,7 @@ M._t = {
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
   statusLines = statusLines, readResult = readResult, selfUpdate = selfUpdate,
-  sleptThrough = sleptThrough, notePower = notePower, harvestNames = harvestNames, noteSeen = noteSeen,
+  sleptThrough = sleptThrough, notePower = notePower, harvestNames = harvestNames,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,
   VERSION = VERSION,
 }
