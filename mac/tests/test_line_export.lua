@@ -608,6 +608,10 @@ hs = {
       local amount = math.tointeger(off[2])
       if not amount then W.fractionalScroll = true; return end
       if W.sheet then return end                     -- シートが出ている間は一覧も動かない
+      -- 点（pixel）単位・行（line）単位のどちらが効くかはアプリしだい（実機 10/24: pixel で動かない）
+      if (unit or "line") == "pixel" and W.knobs.pixelScrollIgnored then return end
+      if unit == "line" and W.knobs.lineScrollIgnored then return end
+      if unit == "line" then amount = amount * (W.knobs.lineScale or 64) end
       off = { off[1], amount }
       if W.knobs.userActsAtScroll == W.scrolls then W.pendingUser = "key" end
       if not W.knobs.synthNoReset then W.lastHID = T end
@@ -1700,6 +1704,40 @@ test("1日1回、書き出しの前に一覧を上から下まで読んで今の
   M._t.runExport()
   check(W.scrolls == scrolls, "同じ日の2回目は集め直さない")
   safe()
+end)
+
+local function fortyOne()
+  local list = {}
+  for i = 1, 40 do list[#list + 1] = { name = "トーク" .. i .. "番", preview = "秘密のメッセージ" .. i } end
+  list[#list + 1] = { name = "Berry", preview = "秘密のメッセージB" }
+  return list
+end
+local function allNames(nt)            -- 行の後ろに「（OCR で読んだ文字）」が付いてもよい
+  for i = 1, 40 do if not nt:find("\nトーク" .. i .. "番[\n\t]") then return false end end
+  return nt:find("\nBerry[\n\t]") ~= nil
+end
+
+test("名前集め: 点単位で一覧が動かない時は、行単位で送って最後まで読む", function()
+  for _, scale in ipairs({ 192, 10 }) do           -- 1行で3行ぶん動くアプリ・少ししか動かないアプリ
+    reset({ knobs = { pixelScrollIgnored = true, lineScale = scale } })
+    local M = withTargets(fortyOne())
+    M._t.runExport()
+    local nt = namesTxt()
+    check(allNames(nt), "1行=" .. scale .. "pt でも 41 件とも集めた:\n" .. nt)
+    check(nt:find("一覧の終わりまで読んだ（行単位で送った）", 1, true), "行単位で送ったと書く:\n" .. nt)
+    check((W.listScroll or 0) == 0, "一番上に戻した")
+    check(not nt:find("秘密", 1, true), "最後のメッセージは書かない")
+  end
+end)
+
+test("名前集め: 点・行単位とも一覧が動かない時は、終わりまで読んだとは書かない", function()
+  reset({ knobs = { pixelScrollIgnored = true, lineScrollIgnored = true } })
+  local M = withTargets(fortyOne())
+  M._t.runExport()
+  local nt = namesTxt()
+  check(nt:find("一覧を下へ送れなかった", 1, true) and not nt:find("一覧の終わりまで読んだ", 1, true),
+    "送れなかったと書く:\n" .. nt)
+  check(nt:find("\nトーク1番\n", 1, true) and not nt:find("\nトーク40番\n", 1, true), "最初の画面の分だけ")
 end)
 
 test("名前が似ているだけのトーク（Berry と Berry2）は書き出さず、names.txt に候補として書くだけ", function()

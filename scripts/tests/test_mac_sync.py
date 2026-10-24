@@ -168,6 +168,33 @@ class TestSyncSh(unittest.TestCase):
         self.assertIn("github", log)
 
 
+    def _github_origin(self, code):
+        """origin を GitHub の URL にし、公開かどうかの問い合わせ（curl）の答えを code にする"""
+        self.git("remote", "set-url", "origin", "https://github.com/denkingon/line-dump.git")
+        fake = self.tmp / "bin"
+        fake.mkdir()
+        (fake / "curl").write_text("#!/bin/sh\nprintf '%s' " + code + "\n")
+        (fake / "curl").chmod(0o755)
+        self.env["PATH"] = str(fake) + os.pathsep + self.env["PATH"]
+
+    def test_refuses_to_ingest_or_push_when_github_repo_is_public(self):
+        self._github_origin("200")
+        head = self.git("rev-parse", "HEAD")
+        r = self.sync()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("公開になっているので、取り込みも push もしない", r.stdout)
+        self.assertIn("Make private", r.stdout)
+        self.assertEqual(self.git("rev-parse", "HEAD"), head, "commit もしない")
+        self.assertFalse((self.work / "chats/田中.txt").exists(), "取り込みもしない")
+        self.assertTrue((self.raw / "[LINE]田中_20261020.txt").exists(), "生 txt は次の回のために残す")
+
+    def test_refuses_when_visibility_cannot_be_checked(self):
+        self._github_origin("000")
+        r = self.sync()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("確かめられない", r.stdout)
+        self.assertFalse((self.work / "chats/田中.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
