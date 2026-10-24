@@ -155,6 +155,24 @@ def _same_talk(a: list[str], b: list[str]) -> bool:
     return merge_bodies(a, b) is not None
 
 
+# 送り主の表示名が変わると、LINE は過去の行も新しい名前で書き出す（実機 10/24:
+# パプリカ🌶️ で 2727 行中 34 行）。先頭も重なりも合わなくなるが同じトークなので、
+# 日付行を除いたメッセージの行の大半が共通なら、同名の別トークとは扱わない。
+# 別トーク同士（同じ名前の 1:1 とグループなど）がここまで同じ行を持つことは無い。
+SAME_TALK_SHARE = 0.8
+
+
+def shared_share(a: list[str], b: list[str]) -> float:
+    """短い方のメッセージ行（日付行を除く）のうち、もう一方にもある行の割合。"""
+    ma = [ln for ln in a if ln and not _DATE_LINE.match(ln)]
+    mb = [ln for ln in b if ln and not _DATE_LINE.match(ln)]
+    small, big = (ma, mb) if len(ma) <= len(mb) else (mb, ma)
+    if len(small) < OVERLAP_LINES:
+        return 0.0          # 短すぎて当てにならない
+    bigset = set(big)
+    return sum(1 for ln in small if ln in bigset) / len(small)
+
+
 def resolve_dest(name: str, new_body: list[str]) -> tuple[Path, list[str] | None, bool]:
     """トーク名と本文アンカーから正本ファイルを解決する。
 
@@ -172,6 +190,12 @@ def resolve_dest(name: str, new_body: list[str]) -> tuple[Path, list[str] | None
             return dest, old_body, False
     if not candidates:
         return CHATS_DIR / f"{base}.txt", None, False
+    # 先頭も重なりも合わないが、行の大半が同じ → 同じトークの、名前の変更などで
+    # 一部の行が書き換わった版。新しい「(2)」は作らない（呼び出し側で旧版として扱う）
+    for dest in candidates:
+        old_body = content_lines(dest.read_text(encoding="utf-8-sig"))
+        if shared_share(old_body, new_body) >= SAME_TALK_SHARE:
+            return dest, old_body, False
     used = {int(m.group(1)) for p in candidates
             if (m := pat.match(p.name)) and m.group(1)}
     n = 2
@@ -223,6 +247,13 @@ def ingest_file(path: Path, force: bool) -> tuple[str, int, int]:
             print(f"{rel}: 結合 ({added:+d}行)")
             return "updated", added, added_msgs
 
+        last = next((ln for ln in reversed(new_body) if ln and not _DATE_LINE.match(ln)), None)
+        if (not force and len(new_body) <= len(old_body) and last in set(old_body)
+                and shared_share(old_body, new_body) >= SAME_TALK_SHARE):
+            # 名前の変更などで一部の行が書き換わった、取り込み済みの範囲の版（最後の
+            # メッセージも取り込み済み）。末尾に新しい行がある短い版は下で警告して飛ばす
+            print(f"{rel}: 旧版（取り込み済み。名前の変更などで一部の行が違う）")
+            return "unchanged", 0, 0
         if len(new_body) < len(old_body):
             if not force:
                 warn(
