@@ -3021,11 +3021,14 @@ end
 -- 1分ごとの確認。確認で想定外のエラーが出ても、理由を記録に残して止まらない
 -- （黙って止まると、こちらからは何も見えない）。STATUS_EVERY ごとに状態も書く
 local function tick()
+  if _G.__LINE_EXPORT ~= M then return end        -- 読み込み直した後に残った古い版のタイマー
   local ok, err = pcall(maybeRun)
   if not ok then
     log("error: 確認の途中で想定外のエラー: " .. tidy(err))
     checked("確認の途中で想定外のエラー: " .. tidy(err):sub(1, 200))
   end
+  -- 自動実行の後に新しい版を読み込んだら、状態は新しい版が書く（古い版で上書きしない）
+  if _G.__LINE_EXPORT ~= M then return end
   -- 時計が戻った時（時刻合わせ等）も止まらないように、差は絶対値で見る
   if not RUN and (not M.statusAt or math.abs(os.time() - M.statusAt) >= STATUS_EVERY) then
     local okw, e = pcall(writeStatus, "定期（" .. STATUS_EVERY // 60 .. " 分ごと）")
@@ -3036,6 +3039,9 @@ end
 -- 二重読み込み対策。init.lua に dofile 行が複数入っていたり、Reload を
 -- 繰り返したりしても、タイマーとホットキーが多重にならないようにする
 -- （多重になると自動操作が同時に2本走り、LINE の画面を奪い合う）。
+-- 前の版が居ない＝Hammerspoon の再起動・Reload Config・update() で読み込んだ。
+-- 確認の記録はメモリにしか無いので、読み込んだ直後に書く前に前の status.txt を残す
+local FRESH = _G.__LINE_EXPORT == nil
 if _G.__LINE_EXPORT then
   local prev = _G.__LINE_EXPORT
   for _, k in ipairs({ "timer", "waker", "wakeTimer", "diagTimer", "updater" }) do
@@ -3113,6 +3119,10 @@ end
 -- 読み込んだことを記録し、すぐ状態を書く（新しい版が入ったか・動いているかを、こちらで見る）
 remember("updateLog", "読み込んだ: " .. VERSION)
 do
+  if FRESH and hs.fs.attributes(STATUS_PATH, "mode") == "file" then
+    pcall(os.remove, DEBUG_DIR .. "/status.prev.txt")
+    pcall(os.rename, STATUS_PATH, DEBUG_DIR .. "/status.prev.txt")
+  end
   local okw, e = pcall(writeStatus, "読み込んだ直後")
   if not okw then log("warn: status.txt を書けない: " .. tidy(e)) end
 end

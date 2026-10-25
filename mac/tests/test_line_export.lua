@@ -514,6 +514,7 @@ local function execute(cmd)
     W.pulled = true
     if W.knobs.pullFails then return "error: Your local changes to the following files would be overwritten by merge:\n", false end
     if W.knobs.pullDiverged then return "fatal: Not possible to fast-forward, aborting.\n", false end
+    if W.knobs.appendOnPull then appendCopyFake(W.knobs.appendOnPull); W.knobs.appendOnPull = nil end
     return "", true
   end
   -- 早送りできない時の積み直し（手元に送れなかった取り込みの commit がある）
@@ -3458,6 +3459,46 @@ test("状態: 確認の理由は数字の違いをまとめ、自動更新の記
   check(#M.updateLog == 2 and M.updateLog[2].n == 2, "版ごとに別の行: " .. #M.updateLog)
   for i = 1, 50 do M._t.remember("checkLog", "理由" .. string.rep("あ", i)) end
   check(#M.checkLog == 40 and M.checkLog[40].text == "理由" .. string.rep("あ", 50), "最後の 40 行だけ持つ: " .. #M.checkLog)
+end)
+
+test("状態: 再起動・Reload Config で読み込んだ時は、前の status.txt を status.prev.txt に残す", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M
+  atClock(6, 0, function() M = load() end)
+  W.lastHID = T - 5
+  atClock(9, 0, function() M._t.tick() end)
+  check(status():find("09:00 使用中", 1, true), "前の記録:\n" .. status())
+  load()                                        -- 前の版が居ない読み込み（hs.reload と同じ）
+  local prev = readfile(DEBUG .. "/status.prev.txt") or ""
+  check(prev:find("09:00 使用中", 1, true), "前の status.txt を残した:\n" .. prev)
+  check(status():find("why: 読み込んだ直後", 1, true) and not status():find("09:00 使用中", 1, true),
+    "新しい status.txt は読み込んだ直後のもの")
+  -- 自動更新の読み込み直し（前の版が居る）では残さない（記録を引き継ぐので要らない）
+  local M2 = loadCopy()
+  run("rm -f " .. sh(DEBUG .. "/status.prev.txt"))
+  appendCopy("\n-- 直した版\n")
+  check(M2._t.selfUpdate("テスト") == "reloaded", "読み込み直した")
+  check(not readfile(DEBUG .. "/status.prev.txt"), "自動更新では status.prev.txt を作らない")
+end)
+
+test("状態: 自動実行の後に新しい版を読み込んだら、古い版の確認は status.txt を上書きしない", function()
+  reset({ chats = chats({ "Berry" }), knobs = { appendOnPull = "\n-- 直した版\n" } })
+  local M
+  atClock(8, 45, function() M = loadCopy() end)
+  atClock(9, 0, function() M._t.tick() end)
+  local M2 = _G.__LINE_EXPORT
+  check(W.saved and M2 ~= M, "書き出して、新しい版を読み込んだ")
+  local st = status()
+  check(st:find("version: " .. M2._t.VERSION, 1, true) and st:find("why: 読み込んだ直後", 1, true),
+    "status.txt は新しい版のまま:\n" .. st)
+  local clicks, lastCheck = #W.clicks, M.lastCheck
+  local logN = #(M2.checkLog or {})
+  local lastN = logN > 0 and M2.checkLog[logN].n or 0
+  atClock(9, 30, function() M._t.tick() end)    -- 止め損ねた古いタイマーが動いても何もしない
+  check(#W.clicks == clicks and _G.__LINE_EXPORT == M2 and status():find("version: " .. M2._t.VERSION, 1, true),
+    "古い版の tick は何もしない")
+  check(M.lastCheck == lastCheck and #(M2.checkLog or {}) == logN and (logN == 0 or M2.checkLog[logN].n == lastN),
+    "古い版は確認もしない（記録を増やさない）")
 end)
 
 test("状態: 自動更新の失敗も記録に残す（git pull の失敗・読み込みの失敗）", function()
