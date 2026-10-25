@@ -17,6 +17,9 @@ local ROOT = run("mktemp -d"):gsub("%s+$", "")
 local ENV = {
   HOME = ROOT .. "/home", LINE_DUMP_REPO = ROOT .. "/repo",
   LINE_DUMP_RAW_DIR = ROOT .. "/out", TMPDIR = ROOT .. "/tmp",
+  -- 眠り・「より前」の試験は 07:00 を境にして作ってある（境の時刻に依らない仕組みの
+  -- 試験）。本物の既定（00:00）は「開始の時刻」の試験で確かめる
+  LINE_DUMP_RUN_AT = "07:00",
 }
 local realgetenv = os.getenv
 os.getenv = function(k) return ENV[k] or realgetenv(k) end
@@ -511,6 +514,7 @@ local function execute(cmd)
     W.pulled = true
     if W.knobs.pullFails then return "error: Your local changes to the following files would be overwritten by merge:\n", false end
     if W.knobs.pullDiverged then return "fatal: Not possible to fast-forward, aborting.\n", false end
+    if W.knobs.appendOnPull then appendCopyFake(W.knobs.appendOnPull); W.knobs.appendOnPull = nil end
     return "", true
   end
   -- 早送りできない時の積み直し（手元に送れなかった取り込みの commit がある）
@@ -3457,6 +3461,46 @@ test("状態: 確認の理由は数字の違いをまとめ、自動更新の記
   check(#M.checkLog == 40 and M.checkLog[40].text == "理由" .. string.rep("あ", 50), "最後の 40 行だけ持つ: " .. #M.checkLog)
 end)
 
+test("状態: 再起動・Reload Config で読み込んだ時は、前の status.txt を status.prev.txt に残す", function()
+  reset({ chats = chats({ "Berry" }) })
+  local M
+  atClock(6, 0, function() M = load() end)
+  W.lastHID = T - 5
+  atClock(9, 0, function() M._t.tick() end)
+  check(status():find("09:00 使用中", 1, true), "前の記録:\n" .. status())
+  load()                                        -- 前の版が居ない読み込み（hs.reload と同じ）
+  local prev = readfile(DEBUG .. "/status.prev.txt") or ""
+  check(prev:find("09:00 使用中", 1, true), "前の status.txt を残した:\n" .. prev)
+  check(status():find("why: 読み込んだ直後", 1, true) and not status():find("09:00 使用中", 1, true),
+    "新しい status.txt は読み込んだ直後のもの")
+  -- 自動更新の読み込み直し（前の版が居る）では残さない（記録を引き継ぐので要らない）
+  local M2 = loadCopy()
+  run("rm -f " .. sh(DEBUG .. "/status.prev.txt"))
+  appendCopy("\n-- 直した版\n")
+  check(M2._t.selfUpdate("テスト") == "reloaded", "読み込み直した")
+  check(not readfile(DEBUG .. "/status.prev.txt"), "自動更新では status.prev.txt を作らない")
+end)
+
+test("状態: 自動実行の後に新しい版を読み込んだら、古い版の確認は status.txt を上書きしない", function()
+  reset({ chats = chats({ "Berry" }), knobs = { appendOnPull = "\n-- 直した版\n" } })
+  local M
+  atClock(8, 45, function() M = loadCopy() end)
+  atClock(9, 0, function() M._t.tick() end)
+  local M2 = _G.__LINE_EXPORT
+  check(W.saved and M2 ~= M, "書き出して、新しい版を読み込んだ")
+  local st = status()
+  check(st:find("version: " .. M2._t.VERSION, 1, true) and st:find("why: 読み込んだ直後", 1, true),
+    "status.txt は新しい版のまま:\n" .. st)
+  local clicks, lastCheck = #W.clicks, M.lastCheck
+  local logN = #(M2.checkLog or {})
+  local lastN = logN > 0 and M2.checkLog[logN].n or 0
+  atClock(9, 30, function() M._t.tick() end)    -- 止め損ねた古いタイマーが動いても何もしない
+  check(#W.clicks == clicks and _G.__LINE_EXPORT == M2 and status():find("version: " .. M2._t.VERSION, 1, true),
+    "古い版の tick は何もしない")
+  check(M.lastCheck == lastCheck and #(M2.checkLog or {}) == logN and (logN == 0 or M2.checkLog[logN].n == lastN),
+    "古い版は確認もしない（記録を増やさない）")
+end)
+
 test("状態: 自動更新の失敗も記録に残す（git pull の失敗・読み込みの失敗）", function()
   reset({ chats = chats({ "Berry" }), knobs = { pullFails = true } })
   local M = loadCopy()
@@ -3482,6 +3526,44 @@ test("状態: 書き出した後の status.txt にもトーク名を入れない
   local st = status()
   check(st:find("why: 定期", 1, true) and st:find("今日の書き出し: 済み", 1, true), "書き出し後の状態:\n" .. st)
   for _, n in ipairs({ "Berry", "Cherry", "Dango" }) do check(not st:find(n, 1, true), n .. " を入れない:\n" .. st) end
+end)
+
+-- ===================== 開始の時刻（2026-10-25: 07:00 → 00:00）=====================
+-- 実機 10/25: 03:03 に離れて 03:23 にロック、03:52 に離れて 03:57 にロック。
+-- 07:00 より前だったので走れず、その後は朝までロックか眠りだった
+local function withDefaultRunAt(fn)
+  local keep = ENV.LINE_DUMP_RUN_AT
+  ENV.LINE_DUMP_RUN_AT = nil
+  local ok, err = pcall(fn)
+  ENV.LINE_DUMP_RUN_AT = keep
+  if not ok then error(err, 0) end
+end
+
+test("開始の時刻: 既定は 00:00。夜中に離れてロックされるまでの間に走る", function()
+  withDefaultRunAt(function()
+    reset({ chats = chats({ "Berry", "Cherry Pie" }) })
+    local M = load()
+    atClock(3, 6, function() M._t.tick() end)
+    check(W.saved, "03:06 の離席で書き出した")
+    check(M.lastCheck and M.lastCheck.why:find("自動実行: 最後まで", 1, true), "最後の確認: " .. tostring(M.lastCheck and M.lastCheck.why))
+    check(heartbeat():find("last_run: ", 1, true) and W.synced >= 1, "heartbeat を書いて push した")
+    local st = status()
+    check(st:find("自動実行の条件: 毎日 00:00 以降", 1, true), "状態に条件:\n" .. st)
+  end)
+end)
+
+test("開始の時刻: 既定（00:00）でも、使用中・ロック中は始めない", function()
+  withDefaultRunAt(function()
+    reset({ chats = chats({ "Berry" }) })
+    local M = load()
+    W.lastHID = T - 30
+    atClock(0, 30, function() M._t.tick() end)
+    check(not W.saved and #W.clicks == 0, "使用中は始めない")
+    W.lastHID = T - 999; W.knobs.locked = true
+    atClock(0, 40, function() M._t.tick() end)
+    check(not W.saved and #W.clicks == 0, "ロック中は始めない")
+    check(M.lastCheck.why == "画面がロック中", "理由: " .. tostring(M.lastCheck.why))
+  end)
 end)
 
 run("rm -rf " .. sh(ROOT))
