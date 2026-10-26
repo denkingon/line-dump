@@ -1179,11 +1179,13 @@ end
 -- 一覧の各行の名前は、その行の時刻と同じ高さ（時刻の 8pt 上〜12pt 下）の文字だけ。
 -- その下の行（最後のメッセージ。実機で時刻の 20pt 下〜）は読まない。
 
--- 一覧の右の列の時刻（12:34・昨日・月曜日・10/21 など）。未読数（数字だけ）は除く
+-- 一覧の右の列の時刻（12:34・昨日・月曜日・10/21・10.21・2025/10/21 など）。未読数（数字
+-- だけ）は除く。日付は区切り（/ . -）の前後の空白も許す（実機 10/26: 下へ送った後の古い
+-- トークの日付を時刻と見なせず、一覧が読めないと止まった）
 local function timeLike(s)
   s = tostring(s or "")
-  return s:find("%d:%d%d") ~= nil or s:find("%d+/%d+") ~= nil or s:find("%d+月%d+日") ~= nil
-      or s:find("%d+%.%d+%.%d+") ~= nil or s:find("昨日", 1, true) ~= nil or s:find("曜", 1, true) ~= nil
+  return s:find("%d:%d%d") ~= nil or s:find("%d+%s*[/%.%-]%s*%d+") ~= nil or s:find("%d+月%d+日") ~= nil
+      or s:find("昨日", 1, true) ~= nil or s:find("曜", 1, true) ~= nil
       or s:lower():find("yesterday", 1, true) ~= nil
 end
 
@@ -1819,6 +1821,18 @@ local function exportRow(app, ctx, win, row, prevHeader)
   local cut = rc:match("^(.-)…$") or rc:match("^(.-)%.%.%.$")
   if cut and (utf8.len(cut) or 0) < 3 then cut = nil end
   local limit, hdr, hl, cap = now() + 4, nil, {}, nil
+  -- 何も開いていない時のトーク欄（真ん中に LINE のロゴの字だけ）か
+  local function emptyPane(items)
+    local k, logo = 0, false
+    for _, it in ipairs(items) do
+      if it.x > ctx.paneX and it.y > ctx.ff.y + ctx.ff.h + 20 then
+        k = k + 1
+        if it.n == "line" then logo = true end
+      end
+    end
+    return logo and k <= 4
+  end
+  local reclicked = false
   while true do
     cap = capture(win, "header")
     local items, oerr = ocr(cap)
@@ -1832,7 +1846,19 @@ local function exportRow(app, ctx, win, row, prevHeader)
     end
     if not hdr and hl[1] and hl[1].n ~= prevHeader then hdr = hl[1] end
     if hdr then break end
-    if now() >= limit then
+    -- 押した行が開かず、トーク欄が空のまま（ヘッダが無く、LINE のロゴの字だけ）なら、
+    -- 1回だけ押し直す。それでも空なら、⋮ を押しに行かずに失敗にする（実機 10/26: 最初の
+    -- 行を押してもトーク欄が空のままで、ヘッダが読めないトークと見なして ⋮ を押していた）
+    if #hl == 0 and emptyPane(items) then
+      if not reclicked then
+        reclicked = true
+        note(ctx, "トーク確認", "押してもトーク欄が空のままなので、もう1回押す")
+        clickAt(row.x, row.y); wait(0.8)
+        limit = now() + 4
+      elseif now() >= limit then
+        return fail(ctx, "トーク確認", "押した行のトークが開かない（トーク欄が空のまま）", cap)
+      end
+    elseif now() >= limit then
       -- ヘッダは読めるが押す前のまま。ただしこの実行で最初に開く行（押す前から開いていた
       -- トークの行かもしれず、一覧とヘッダで文字が違うことがある）は、保存名が行の名前と
       -- 合うかで確かめる（合わなければ、押す前から開いていた別のトークなので保存しない）
@@ -1891,11 +1917,25 @@ local function exportList(app, R)
   local top = ctx0.ff.y + ctx0.ff.h
   local sc = newScroller((ctx0.ff.x + paneX) / 2, (top + f.y + f.h) / 2, math.max(100, f.y + f.h - top - 90))
   sc.top()
-  local last
+  local last, lastItems
   local function read()
     local its
     its, last = readList(ctx0, win, field, ffAX)
+    lastItems = its
     return its and rowNames(its, ctx0.ff, paneX) or nil, its
+  end
+  -- 一覧が読めない時に、右の列（時刻の所）に何が見えたかを形だけ残す（数字は 9 に。
+  -- トークの名前や中身は出さない）。時刻の読み方を直すため
+  local function timeColumn()
+    local t = {}
+    for _, it in ipairs(lastItems or {}) do
+      if it.y > ctx0.ff.y + ctx0.ff.h + 2 and it.x > paneX - 70 and it.x < paneX + 40 then
+        local str = tostring(it.text)
+        t[#t + 1] = str:match("^[%d%p%s]+$") and (str:gsub("%d", "9")) or masked(str)
+        if #t >= 12 then break end
+      end
+    end
+    return "一覧の右の列: " .. (#t > 0 and table.concat(t, " / ") or "（何も無い）")
   end
   local rows, its = read()
   if not rows then return whole("OCR", "OCR が動かない", last) end
@@ -1914,7 +1954,7 @@ local function exportList(app, R)
     if #d > 0 then gap = d[math.floor((#d + 1) / 2)] end
   end
   local function keyOf(r) return rowKey(r) .. "@" .. math.floor((r.y + sc.offset) / gap + 0.5) end
-  local tried, thisRun, n, lastKey, anyOpened, idx = {}, {}, 0, nil, false, 0
+  local tried, triedName, thisRun, n, lastKey, anyOpened, idx = {}, {}, {}, 0, nil, false, 0
   local skipsInRow = 0                              -- 「トークを保存」が無いトークが続いた数
   while n < LIST_TOP and rows do
     -- 前の行で保存ダイアログが残っていたら（押す所が塞がれて止まった時など）閉じる。
@@ -1926,19 +1966,29 @@ local function exportList(app, R)
         break
       end
     end
+    -- 開いた行は、位置でも名前でも見分ける。一覧が並び替わって位置が変わっても、その
+    -- 名前の行が今の一覧に1つだけで、この実行で1回だけ開いていれば済み（実機 10/26:
+    -- 保存したトークが一覧の下へ動き、すぐ上の済んだ行が1行ずつ上がって、開いたままの
+    -- トークの行をもう一度押し「開かない」と失敗にしていた）。同じに読める名前の行が
+    -- いくつもある時は、今までどおり位置で見分ける
     local row
+    local seenNow = {}
+    for _, r in ipairs(rows) do local k = rowKey(r); seenNow[k] = (seenNow[k] or 0) + 1 end
     for _, r in ipairs(rows) do
       r.key = keyOf(r)
-      if not tried[r.key] then row = r; break end
+      local k = rowKey(r)
+      local byName = r.n ~= "" and seenNow[k] == 1 and triedName[k] == 1
+      if not tried[r.key] and not byName then row = r; break end
     end
     if not row then
       local why
       rows, why = sc.down(rows, read)             -- 見えている行は済んだ: 下へ送る
       if not rows and why == "unreadable" then
-        whole("一覧", "下へ送った後の一覧の行が読めない（" .. n .. " 件の後）", last)
+        whole("一覧", "下へ送った後の一覧の行が読めない（" .. n .. " 件の後）", last, timeColumn())
       end
     else
       tried[row.key] = true
+      triedName[rowKey(row)] = (triedName[rowKey(row)] or 0) + 1
       n = n + 1                                     -- 20 件に数える数（飛ばした・同じトークは戻す）
       idx = idx + 1                                 -- 開いた行の順番（診断と heartbeat の「何番目」）
       local ctx = { name = "一覧の" .. idx .. "番目", tn = row.n, trace = {}, win = win, paneX = paneX,
@@ -2003,7 +2053,7 @@ local function exportList(app, R)
       rows = read()                                 -- 開いた後の一覧（新着で並び替わることがある）
       if not rows or #rows == 0 then wait(1); rows = read() end
       if not rows or #rows == 0 then
-        whole("一覧", "保存した後の一覧の行が読めない（" .. n .. " 件の後）", last)
+        whole("一覧", "保存した後の一覧の行が読めない（" .. n .. " 件の後）", last, timeColumn())
         rows = nil
       end
     end
