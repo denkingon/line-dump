@@ -400,6 +400,9 @@ local function sheetEl()
       -- 名前欄の「/」は POSIX のファイル名では「:」になる（macOS の仕様）
       local p = (W.knobs.saveDir or (HOME .. "/Downloads")) .. "/" .. final:gsub("/", ":")
       if W.knobs.saveFails then return end
+      -- saveFailsOnce: そのトークでは1回目だけ「保存」を押しても保存されない（ダイアログが閉じない）
+      local oc3 = W.open and chat(W.open)
+      if oc3 and oc3.saveFailsOnce and not oc3.saveFailDone then oc3.saveFailDone = true; return end
       W.pressedSave = true
       if exists(p) then W.sheet.confirm = p; return end
       doSave(p)
@@ -2734,12 +2737,15 @@ test("見直し 10/26 夜（6）: B3: 開いている間にそのトークに新
   end
 end)
 
-test("見直し fuzz（FUZZ_FROM を付けた時だけ）", function()
-  if not realgetenv("FUZZ_FROM") then return end   -- 手で流す時だけ
-  local FROM = tonumber(realgetenv("FUZZ_FROM") or "1")
-  local TO = tonumber(realgetenv("FUZZ_TO") or "200")
+test("見直し fuzz（見つかった種。FUZZ_FROM で範囲）", function()
+  -- 普段は見つかったことのある種だけ流す。FUZZ_FROM〜FUZZ_TO を付けると、その範囲を全部流す
+  local seeds = { 149, 198, 353 }
+  if realgetenv("FUZZ_FROM") then
+    seeds = {}
+    for k = tonumber(realgetenv("FUZZ_FROM")), tonumber(realgetenv("FUZZ_TO") or "200") do seeds[#seeds + 1] = k end
+  end
   local shown = 0
-  for seed = FROM, TO do
+  for _, seed in ipairs(seeds) do
     math.randomseed(seed)
     local R = math.random
     local list = numbered(30)
@@ -2821,12 +2827,15 @@ test("見直し fuzz（FUZZ_FROM を付けた時だけ）", function()
   end
 end)
 
-test("見直し fuzzS（FUZZ_FROM を付けた時だけ）", function()
-  if not realgetenv("FUZZ_FROM") then return end   -- 手で流す時だけ
-  local FROM = tonumber(realgetenv("FUZZ_FROM") or "1")
-  local TO = tonumber(realgetenv("FUZZ_TO") or "200")
+test("見直し fuzzS（見つかった種。FUZZ_FROM で範囲）", function()
+  -- 普段は見つかったことのある種だけ流す。FUZZ_FROM〜FUZZ_TO を付けると、その範囲を全部流す
+  local seeds = { 183 }
+  if realgetenv("FUZZ_FROM") then
+    seeds = {}
+    for k = tonumber(realgetenv("FUZZ_FROM")), tonumber(realgetenv("FUZZ_TO") or "200") do seeds[#seeds + 1] = k end
+  end
   local shown = 0
-  for seed = FROM, TO do
+  for _, seed in ipairs(seeds) do
     math.randomseed(seed)
     local R = math.random
     local list = numbered(40)
@@ -2903,12 +2912,15 @@ test("見直し fuzzS（FUZZ_FROM を付けた時だけ）", function()
   end
 end)
 
-test("見直し fuzzW（FUZZ_FROM を付けた時だけ）", function()
-  if not realgetenv("FUZZ_FROM") then return end   -- 手で流す時だけ
-  local FROM = tonumber(realgetenv("FUZZ_FROM") or "1")
-  local TO = tonumber(realgetenv("FUZZ_TO") or "200")
+test("見直し fuzzW（見つかった種。FUZZ_FROM で範囲）", function()
+  -- 普段は見つかったことのある種だけ流す。FUZZ_FROM〜FUZZ_TO を付けると、その範囲を全部流す
+  local seeds = { 9, 88, 130, 149 }
+  if realgetenv("FUZZ_FROM") then
+    seeds = {}
+    for k = tonumber(realgetenv("FUZZ_FROM")), tonumber(realgetenv("FUZZ_TO") or "200") do seeds[#seeds + 1] = k end
+  end
   local shown = 0
-  for seed = FROM, TO do
+  for _, seed in ipairs(seeds) do
     math.randomseed(seed)
     local R = math.random
     local list = numbered(30)
@@ -3273,6 +3285,256 @@ test("見直し 10/26 夜（8）ピン留め: ピン留めの最後の行を開�
   check(l25:find("失敗", 1, true) ~= nil, "25番は失敗と書く:\n" .. namesTxt())
   check(line(hb, "ok: 19") and line(hb, "ng: 1") and not has("トーク20番"), "21 番目を保存せず失敗に数える:\n" .. hb)
   safe()
+end)
+
+-- ===================== r3: 同じ行の字（名前の読めない行・同じに読める名前）の別のトークが、済んだ行の位置に来る =====================
+local function r3top(n) local t = {}; for i = 1, n do t[#t + 1] = W.chats[i].name end; return t end
+local function r3miss(names) local t = {}; for _, nm in ipairs(names) do if not has(nm) then t[#t + 1] = nm end end; return t end
+test("見直し 10/26 夜（9）r3 T1: 開いた名前の読めないトークが下へ動き、すぐ下の名前の読めない別のトークが上がってきても取りこぼさない", function()
+  local list = numbered(25)
+  table.insert(list, 5, { name = "🐱", ocrRow = "", ocrHeader = "" })
+  table.insert(list, 6, { name = "🐶", ocrRow = "", ocrHeader = "" })
+  reset({ chats = list, knobs = { moveOnOpen = { when = "🐱", name = "🐱", to = 9 } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  local miss = r3miss(r3top(20))
+  check(#miss == 0 or line(hb, "ng: " .. #miss), "T1 取りこぼし(NG無し): " .. table.concat(miss, ",") .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n" .. hb)
+  safe()
+end)
+test("見直し 10/26 夜（9）r3 T2: 開いた同じに読める名前のトークが下へ動き、もう片方が上がってきても取りこぼさない", function()
+  local list = numbered(25)
+  table.insert(list, 5, { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true })
+  table.insert(list, 6, { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true })
+  reset({ chats = list, knobs = { moveOnOpen = { when = "パプリカ🍅", name = "パプリカ🍅", to = 9 } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  local miss = r3miss(r3top(20))
+  check(#miss == 0 or line(hb, "ng: " .. #miss), "T2 取りこぼし(NG無し): " .. table.concat(miss, ",") .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n" .. hb)
+  safe()
+end)
+test("見直し 10/26 夜（9）r3 T3: 一番上の名前の読めないトークを開いた後、名前の読めない別のトークに新着が来て一番上へ来ても取りこぼさない", function()
+  local list = numbered(25)
+  table.insert(list, 1, { name = "🐱", ocrRow = "", ocrHeader = "" })
+  table.insert(list, 17, { name = "🐶", ocrRow = "", ocrHeader = "" })
+  reset({ chats = list, knobs = { reorderAtOpens = { [5] = "🐶" } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  local miss = r3miss(r3top(20))
+  check(#miss == 0 or line(hb, "ng: " .. #miss), "T3 取りこぼし(NG無し): " .. table.concat(miss, ",") .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n" .. hb)
+  safe()
+end)
+test("見直し 10/26 夜（9）r3 T4: 下へ送った後、名前の読めない別のトークに新着が来て一番上へ来ても（一番上も名前の読めないトーク）、取りこぼさない", function()
+  for _, v in ipairs({ { a = { name = "🐱", ocrRow = "", ocrHeader = "" }, b = { name = "🐶", ocrRow = "", ocrHeader = "" } },
+                       { a = { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true },
+                         b = { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } } }) do
+    local list = numbered(30)
+    table.insert(list, 1, v.a)
+    table.insert(list, 27, v.b)
+    reset({ chats = list, knobs = { reorderAtOpens = { [15] = v.b.name } } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local miss = r3miss(r3top(20))
+    check(#miss == 0 or line(hb, "ng: " .. #miss), "T4 " .. v.b.name .. " 取りこぼし(NG無し): " .. table.concat(miss, ",") .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n保存 " .. table.concat(outFiles(), ",") .. "\n" .. hb)
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（9）r3 T5: 選ばれると字が読めない一番上のトークの後、名前の読めない（絵文字だけの）トークに新着が来て一番上へ来ても取りこぼさない", function()
+  for _, v in ipairs({ { at = 5, pre = false }, { at = 15, pre = false }, { at = 5, pre = true }, { at = 15, pre = true } }) do
+    local list = numbered(30)
+    list[1].ocrRowOpen = ""                          -- 選ばれると名前の字が読めない（実機）
+    table.insert(list, 27, { name = "🐶", ocrRow = "", ocrHeader = "" })   -- 絵文字だけの名前
+    reset({ chats = list, knobs = { reorderAtOpens = { [v.at] = "🐶" } }, open = v.pre and "トーク1番" or nil })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local miss = r3miss(r3top(20))
+    check(#miss == 0 or line(hb, "ng: " .. #miss), "T5 at=" .. v.at .. (v.pre and " 前から開いていた" or "") .. " 取りこぼし(NG無し): " .. table.concat(miss, ",") ..
+      " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n保存 " .. #outFiles() .. (has("トーク20番") and " (21番目のトーク20番を保存)" or "") .. "\n" .. hb)
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（9）r3 T6: 保存で失敗したトークに新着が来て開き直しても（この実行で済んだ保存名）、保存しないまま失敗を取り消さない", function()
+  for _, v in ipairs({ { ro = { [6] = "トーク3番" } }, { ro = { [15] = "トーク3番" } }, { mv = { when = "トーク4番", name = "トーク3番", to = 6 } } }) do
+    local list = numbered(30)
+    list[3].saveFailsOnce = true                      -- 3番は1回目の保存でダイアログが閉じない（失敗）
+    reset({ chats = list, knobs = { reorderAtOpens = v.ro, moveOnOpen = v.mv } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local miss = r3miss(r3top(20))
+    check(#miss == 0 or line(hb, "ng: " .. #miss), "T6 " .. (v.ro and next(v.ro) or "mv") .. ": 取りこぼし(NG無し): " .. table.concat(miss, ",") ..
+      " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n保存 " .. #outFiles() .. (has("トーク21番") and " (トーク21番を保存)" or "") .. "\n" .. hb ..
+      "\nnames.txt の3番: " .. (namesTxt():match("[^\n]*トーク3番[^\n]*") or "?"))
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（9）r3 T7: 始める前から開いていたトークの名前が最初の行の名前を含む時、最初の行が1回目の押しで開かなくても、取りこぼさない", function()
+  for _, v in ipairs({ { top = "トーク1番", pre = "トーク1番の家族" }, { top = "トーク1番の家族", pre = "トーク1番" } }) do
+    local list = numbered(25)
+    list[1] = { name = v.top, firstClickNoOpen = true }
+    table.insert(list, 6, { name = v.pre })
+    reset({ chats = list, open = v.pre })
+    local M = load()
+    M._t.runExport(true)
+    local hb, nt = heartbeat(), namesTxt()
+    local miss = r3miss(r3top(20))
+    check(#miss == 0 or line(hb, "ng: " .. #miss), "T7 " .. v.top .. "/" .. v.pre .. ": 取りこぼし(NG無し): " .. table.concat(miss, ",") ..
+      " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n" .. hb .. (nt:match("\n1%. [^\n]*") or ""))
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（9）r3 T8: 開いた行が選ばれて字が変わっている間に、その名前を含む・含まれる別のトークに新着が来て一番上へ来ても、取りこぼさない", function()
+  for _, v in ipairs({ { open = "トーク3番ミ", other = "トーク3番の会" }, { open = "", other = "トーク3番の会" },
+                       { open = "トーク3番ミ", other = "トーク3" }, { open = "トーク3番", row = "トーク3番(123)", other = "トーク3番の会" } }) do
+    local list = numbered(30)
+    list[3].ocrRowOpen = v.open
+    list[3].ocrRow = v.row
+    table.insert(list, 16, { name = v.other })
+    reset({ chats = list, knobs = { reorderAtOpens = { [3] = v.other } } })
+    local M = load()
+    M._t.runExport(true)
+    local hb, nt = heartbeat(), namesTxt()
+    local tag = "T8 open='" .. v.open .. "'" .. (v.row and (" row=" .. v.row) or "") .. " " .. v.other .. ": "
+    check(has(v.other), tag .. "新着で一番上へ来た " .. v.other .. " を開いて保存する / 開いた順 " .. table.concat(W.openLog, ","))
+    check(line(hb, "ng: 0") and not nt:find("トーク3番[^\n]*\t失敗", 1), tag .. "保存した3番を失敗にしない:\n" .. hb .. (nt:match("\n4%. [^\n]*") or ""))
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（9）r3 fuzzR（FUZZ_FROM を付けた時だけ）", function()
+  if not realgetenv("FUZZ_FROM") then return end
+  local FROM = tonumber(realgetenv("FUZZ_FROM") or "1")
+  local TO = tonumber(realgetenv("FUZZ_TO") or "200")
+  local UNIQUE = realgetenv("FUZZ_UNIQUE")          -- 同じに読める名前・名前の読めない行を使わない
+  for seed = FROM, TO do
+    math.randomseed(seed)
+    local R = math.random
+    local list = numbered(34)
+    local desc = {}
+    local pinned = R(1, 3) == 1
+    local knobs = {}
+    if pinned then knobs.insertAt = 3; desc[#desc + 1] = "pinned2" end
+    for i = 2, 26 do
+      local c = list[i]
+      local u = R(1, 100)
+      if u <= 10 then c.ocrRowOpen = ""; desc[#desc + 1] = c.name .. ".open=''"
+      elseif u <= 20 then c.ocrRowOpen = c.name .. "ミ"; desc[#desc + 1] = c.name .. ".open=ミ"
+      elseif u <= 26 then c.ocrRow = c.name .. "(123)"; c.ocrRowOpen = c.name; desc[#desc + 1] = c.name .. ".(123)"
+      elseif u <= 32 then c.ocrRow = c.name .. " 3"; c.ocrRowAfterOpen = c.name; desc[#desc + 1] = c.name .. ".unread" end
+      if R(1, 100) <= 10 then c.ocrHeader = c.name .. " ゆう"; desc[#desc + 1] = c.name .. ".hdr" end
+    end
+    if not UNIQUE then
+      if R(1, 4) == 1 then local at = R(1, 22); table.insert(list, at, { name = "🐱", ocrRow = "", ocrHeader = "" }); desc[#desc + 1] = "🐱@" .. at end
+      if R(1, 5) == 1 then local at = R(1, 22); table.insert(list, at, { name = "🐶", ocrRow = "", ocrHeader = "" }); desc[#desc + 1] = "🐶@" .. at end
+    end
+    if R(1, 4) == 1 then local at = R(1, 22); table.insert(list, at, { name = "母" }); desc[#desc + 1] = "母@" .. at end
+    if R(1, 5) == 1 then local at = R(1, 22); table.insert(list, at, { name = "母の会" }); desc[#desc + 1] = "母の会@" .. at end
+    local skips = {}
+    if R(1, 4) == 1 then
+      local at = R(2, 20)
+      skips[list[at].name] = true
+      list[at].menuItems = { "通知オフ", "トーク履歴を削除" }; desc[#desc + 1] = "skip=" .. list[at].name
+    end
+    if R(1, 2) == 1 then
+      local k = R(3, 19)
+      local nameIdx = k - R(0, 2)
+      local mv = { when = list[k].name, name = list[nameIdx].name, to = k + R(1, 5) }
+      knobs.moveOnOpen = mv; desc[#desc + 1] = "move(" .. mv.when .. ":" .. mv.name .. "->" .. mv.to .. ")"
+    end
+    if R(1, 10) <= 7 then
+      knobs.reorderAtOpens = {}
+      for _ = 1, R(1, 3) do
+        local j = R(1, 19)
+        local nm = list[R(pinned and 3 or 2, #list)].name
+        knobs.reorderAtOpens[j] = nm; desc[#desc + 1] = "ro[" .. j .. "]=" .. nm
+      end
+    end
+    if R(1, 4) == 1 then
+      local nm = list[R(14, #list)].name
+      knobs.reorderAtDownScroll = { [1] = nm }; desc[#desc + 1] = "rds=" .. nm
+    end
+    if R(1, 4) == 1 then
+      knobs.reorderBeforeRowClick = {}
+      local j = R(1, 18)
+      local nm = list[R(pinned and 3 or 2, #list)].name
+      knobs.reorderBeforeRowClick[j] = nm; desc[#desc + 1] = "rb[" .. j .. "]=" .. nm
+    end
+    local openName
+    if R(1, 4) == 1 then openName = list[R(1, 25)].name; desc[#desc + 1] = "preopen=" .. openName end
+    if R(1, 4) == 1 then local i = R(1, 20); list[i].firstClickNoOpen = true; desc[#desc + 1] = "fcno=" .. list[i].name end
+    local mvName = knobs.moveOnOpen and knobs.moveOnOpen.name
+    reset({ chats = list, knobs = knobs, open = openName })
+    local M = load()
+    local ok, err = pcall(function() M._t.runExport(true) end)
+    local final = {}
+    for _, c in ipairs(W.chats) do if not c.hidden then final[#final + 1] = c.name end end
+    local limit = 20
+    if mvName and has(mvName) then
+      local inTop = false
+      for i = 1, 20 do if final[i] == mvName then inTop = true end end
+      if not inTop then limit = 19 end
+    end
+    local missing, want = {}, 0
+    for _, nm in ipairs(final) do
+      if want >= limit then break end
+      if not skips[nm] then
+        want = want + 1
+        if not has(nm) then missing[#missing + 1] = nm end
+      end
+    end
+    local hb = heartbeat()
+    local okN = tonumber(hb:match("\nok: (%d+)")) or -1
+    local ngN = tonumber(hb:match("\nng: (%d+)")) or -1
+    local bad = {}
+    if not ok then bad[#bad + 1] = "例外 " .. tostring(type(err) == "table" and (err.abort or err.blocked) or err) end
+    if #missing > ngN then bad[#bad + 1] = "取りこぼし(NG無し) " .. table.concat(missing, ",") .. " ng=" .. ngN end
+    if okN ~= #outFiles() then bad[#bad + 1] = "ok数 " .. okN .. " ≠ 保存 " .. #outFiles() end
+    for _, s in ipairs(W.menuClicked) do if s ~= "トークを保存" then bad[#bad + 1] = "メニュー " .. s end end
+    if #bad > 0 then
+      check(false, "seed " .. seed .. ": " .. table.concat(bad, " / ") .. "\n    設定: " .. table.concat(desc, " ") ..
+        "\n    開いた順: " .. table.concat(W.openLog, ",") .. "\n    最終: " .. table.concat(final, ",", 1, 22) ..
+        "\n    hb: " .. hb:gsub("\n", " | ") .. (realgetenv("FUZZ_NAMES") and ("\n" .. namesTxt() .. "\n" .. table.concat(W.logs, "\n")) or ""))
+    end
+  end
+end)
+
+test("見直し 10/26 夜（10）: 行単位で送る一覧で、最初に送る（1行の量を測る）間に新着が来ても、上位 20 件を取りこぼさない", function()
+  for _, ls in ipairs({ 10, 16, 24, 40, 64 }) do
+    for _, who in ipairs({ "トーク17番", "トーク30番" }) do
+      reset({ chats = numbered(34), knobs = { pixelScrollIgnored = true, lineScale = ls, reorderAtDownScroll = { [1] = who } } })
+      local M = load()
+      M._t.runExport(true)
+      local hb = heartbeat()
+      local top = {}
+      for i = 1, 20 do top[#top + 1] = W.chats[i].name end
+      local miss = missingOf(top)
+      check(#miss == 0 and line(hb, "ng: 0"), ls .. "pt/" .. who .. ": 足りない " .. table.concat(miss, ",") .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n" .. hb)
+      safe()
+    end
+  end
+end)
+
+test("見直し 10/26 夜（10）: 下へ送る間に上へ来たトークは、途中で一番上へ戻して見えただけでも、20 件の後の見直しで開く", function()
+  for _, k in ipairs({ { reorderAtDownScroll = { [1] = "トーク13番" }, reorderAtOpens = { [19] = "トーク29番" } },
+                       { reorderAtOpens = { [13] = "トーク25番" }, reorderAtDownScroll = { [2] = "トーク17番" } } }) do
+    reset({ chats = numbered(30), knobs = k })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local top = {}
+    for i = 1, 20 do top[#top + 1] = W.chats[i].name end
+    local miss = missingOf(top)
+    check(#miss == 0 and line(hb, "ng: 0"), "足りない " .. table.concat(miss, ",") .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n" .. hb)
+    safe()
+  end
 end)
 
 test("実機 10/26: 最初の行を押してもトーク欄が空のままなら、もう1回押して開く", function()
