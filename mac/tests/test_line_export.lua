@@ -144,11 +144,15 @@ local function visibleTexts(screen)
   end
   for i, c in ipairs(results()) do
     if L.rowY(i) < L.listTop then goto hidden end
-    if not W.knobs.ocrDropRows then add(c.ocrRow or c.name, L.rowX, L.rowY(i)) end
+    -- ocrRowOpen: そのトークが開いている（一覧で選ばれて色が付いた）間の行の OCR の文字。
+    -- ocrRowAfterOpen: 一度開いた後の行の OCR の文字（未読の印が消える等）
+    if not W.knobs.ocrDropRows then
+      add((W.open == c.name and c.ocrRowOpen) or (c.openedOnce and c.ocrRowAfterOpen) or c.ocrRow or c.name, L.rowX, L.rowY(i))
+    end
     -- 最後のメッセージ。実機では時刻の 20pt 下（名前の 11pt 下）のこともある: previewDY
     add(c.preview or "最後のメッセージ", L.rowX, L.rowY(i) + (W.knobs.previewDY or 18))
     -- 行の右上に最後のメッセージの時刻（実機と同じく名前より少し上）
-    if not W.knobs.noRowTimes then add(c.time or "12:34", L.field.x + (W.knobs.timeDX or 250), L.rowY(i) - 9) end
+    if not W.knobs.noRowTimes and not (W.knobs.noTimesAfterSheet and (W.sheetsOpened or 0) >= W.knobs.noTimesAfterSheet) then add(c.time or "12:34", L.field.x + (W.knobs.timeDX or 250), L.rowY(i) - 9) end
     ::hidden::
   end
   if not W.open and W.knobs.emptyLogo then
@@ -254,6 +258,11 @@ local function click(pt)
       if math.abs(pt.y - p.y) < 12 and math.abs(pt.x - p.x) < 70 then
         W.menuClicked[#W.menuClicked + 1] = s
         W.menuOpen = false
+        -- saveDead: そのトークでは「トークを保存」を押しても保存ダイアログが出ない（saveDeadOnce は1回目だけ）
+        local oc = W.open and chat(W.open)
+        if s == "トークを保存" and oc and (oc.saveDead or (oc.saveDeadOnce and not oc.saveDeadDone)) then
+          oc.saveDeadDone = true; return
+        end
         if s == "トークを保存" and not W.knobs.saveItemDead then openSheet() end
         return
       end
@@ -284,6 +293,7 @@ local function click(pt)
       -- 1回目を押しても開かない行（実機 10/26: 最初の行を押してもトーク欄が空のままだった）
       if c.firstClickNoOpen and not c.clickedOnce then c.clickedOnce = true; return end
       W.open = c.opens or opened(c); W.openedAt = T  -- opens: 押すと別のトークが開く行
+      c.openedOnce = true
       -- 開いた後で、別のトークが一覧の下へ動く（実機 10/26: 保存したトークが下へ動き、
       -- その下の行が1行ずつ上がった）
       local mv = W.knobs.moveOnOpen
@@ -294,6 +304,14 @@ local function click(pt)
         end
       end
       W.focus = "input"
+      -- k 回目に行を開いた後で、そのトークに新着が来て一番上へ（reorderAtOpens = { [k] = 名前 }）
+      local ro = W.knobs.reorderAtOpens and W.knobs.reorderAtOpens[#W.openLog]
+      if ro then
+        W.knobs.reorderAtOpens[#W.openLog] = nil
+        for k, x in ipairs(W.chats) do
+          if x.name == ro then table.remove(W.chats, k); table.insert(W.chats, 1, x); break end
+        end
+      end
       -- 新着で別のトークが一覧の一番上に来る（reorderAtClick 回目に押した後）
       if W.knobs.reorderAtClick == W.clickN then
         for k, x in ipairs(W.chats) do
@@ -2055,6 +2073,188 @@ test("実機 10/26 21:22: 今日もう保存済みのトークが並び替わっ
   check(has("トーク20番") and not has("トーク3番"), "下の行まで届き、保存済みは保存し直さない: " .. table.concat(outFiles(), ","))
   local hb = heartbeat()
   check(line(hb, "ok: 20") and line(hb, "ng: 0"), "合わせて 20 件:\n" .. hb)
+  safe()
+end)
+
+-- ===================== 見直し 10/26 夜: 行の字の揺れ・並び替わり =====================
+local function opensOf(name) local k = 0; for _, n in ipairs(W.openLog) do if n == name then k = k + 1 end end; return k end
+local function retryAfter(list, upto)              -- 今日 1〜upto 番目は保存済み（新しい版でのやり直し）
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  local ok = {}
+  for i = 1, upto do ok[#ok + 1] = "ok=" .. list[i].name end
+  writefile(REPO .. "/mac/.last_result", "day=" .. TODAY .. "\nversion=v4.1-00000000\nng=1\n" .. table.concat(ok, "\n") .. "\n")
+end
+
+test("実機 10/26 21:22: 開いて選ばれた行の字が変わっても（メンバー数・「…」の位置）、同じトークを続けて2回開かない", function()
+  local list = numbered(25)
+  list[7].ocrRow, list[7].ocrRowOpen = "トーク7番(123)", "トーク7番"          -- 選ばれるとメンバー数が読めない
+  list[17].name = "トーク17番のみんなの会"
+  list[17].ocrRow, list[17].ocrRowOpen = "トーク17番の…", "トーク17番のみ…"   -- 選ばれると切れる所が1字ずれる
+  list[18].ocrRow, list[18].ocrRowOpen, list[18].ocrHeader = "トーク18番(1", "トーク18番(12", "トーク18番(123)ビ"
+  reset({ chats = list })
+  retryAfter(list, 19)
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  local hb = heartbeat()
+  check(line(hb, "ok: 20") and line(hb, "ng: 0") and has("トーク20番"), "20 件:\n" .. hb)
+  check(opensOf("トーク7番") == 1 and opensOf("トーク17番のみんなの会") == 1 and opensOf("トーク18番") == 1,
+    "1回ずつ開く: " .. table.concat(W.openLog, ","))
+  check(#W.openLog == 20, "開いたのは 20 行: " .. #W.openLog)
+  safe()
+end)
+
+test("見直し 10/26 夜: 開いて選ばれた行の字が変わり、ヘッダが行の名前と違うトークでも、また押して失敗にしない", function()
+  for _, v in ipairs({
+    { row = "トーク3番(123)", open = "トーク3番", header = "トーク3番 ゆう" },   -- メンバー数が消える＋ヘッダが長い（実機）
+    { row = "トーク3番", open = "トーク3番ミ" },                                -- 選ばれるとアイコンを字に読む
+    { row = "トーク3番", open = "" },                                           -- 選ばれると名前の字が読めない
+    { row = "トーク3番 3", after = "トーク3番", header = "トーク3番 ゆう" },     -- 開いた後は未読の印が消える
+    { row = "トーク3番 (12", after = "トーク3番 (12)", header = "トーク3番 ゆう" },
+  }) do
+    local list = numbered(25)
+    list[3].ocrRow, list[3].ocrRowOpen, list[3].ocrRowAfterOpen, list[3].ocrHeader = v.row, v.open, v.after, v.header
+    reset({ chats = list })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local tag = (v.open or v.after) .. ": "
+    check(line(hb, "ng: 0") and line(hb, "ok: 20") and has("トーク20番"), tag .. "失敗にせず 20 件目まで:\n" .. hb)
+    check(opensOf("トーク3番") == 1, tag .. "3番を1回だけ開く: " .. table.concat(W.openLog, ","))
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜: 始める前から開いていた（選ばれていた）トークの行の字が、次の行を開いた後で戻っても、また開かない", function()
+  local list = numbered(25)
+  list[1].ocrRowOpen = "トーク1番ミ"
+  reset({ chats = list, open = "トーク1番" })
+  local M = load()
+  M._t.runExport(true)
+  check(line(heartbeat(), "ok: 20") and line(heartbeat(), "ng: 0") and has("トーク20番"), "20 件:\n" .. heartbeat())
+  check(opensOf("トーク1番") == 1, "1番を1回だけ開く: " .. table.concat(W.openLog, ","))
+  safe()
+end)
+
+test("見直し 10/26 夜: 失敗した・飛ばしたトークの行の字が開いた後で変わっても、もう1回開いて2回数えない", function()
+  for _, kind in ipairs({ "once", "always", "skip" }) do
+    local list = numbered(25)
+    list[3].ocrRow, list[3].ocrRowOpen = "トーク3番(123)", "トーク3番"
+    if kind == "once" then list[3].saveDeadOnce = true
+    elseif kind == "always" then list[3].saveDead = true
+    else list[3].menuItems = { "通知オフ", "トーク履歴を削除", "退会" } end
+    reset({ chats = list })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    check(opensOf("トーク3番") == 1, kind .. ": 3番を1回だけ開く: " .. table.concat(W.openLog, ","))
+    check(kind == "skip" or has("トーク20番"), kind .. ": 20 件目まで届く: " .. table.concat(outFiles(), ","))
+    check(not line(hb, "ng: 2") and not hb:find("2 件飛ばした", 1, true), kind .. ": 1つのトークを2回数えない:\n" .. hb)
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜: 下へ送った後で、まだ開いていない上位のトークに新着が来て一番上へ動いても、取りこぼさない", function()
+  for _, ro in ipairs({ { [15] = "トーク18番" }, { [14] = "トーク17番", [16] = "トーク19番" }, { [13] = "トーク28番" } }) do
+    local want, moved = {}, {}                      -- 上位 20 件（偽物は ro を使うと消すので先に）
+    for _, nm in pairs(ro) do moved[nm] = true; want[#want + 1] = nm end
+    for i = 1, 30 do
+      local nm = "トーク" .. i .. "番"
+      if not moved[nm] and #want < 20 then want[#want + 1] = nm end
+    end
+    reset({ chats = numbered(30), knobs = { reorderAtOpens = ro } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    for _, nm in ipairs(want) do check(has(nm), nm .. " を保存: " .. table.concat(outFiles(), ",")) end
+    check(#outFiles() == 20, "20 件だけ: " .. table.concat(outFiles(), ","))
+    check(line(hb, "ok: 20") and line(hb, "ng: 0"), "数:\n" .. hb)
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜: 新着で一番上に来たトークの下の、済んだ行を開き直さない", function()
+  reset({ chats = numbered(30), knobs = { reorderAtOpens = { [8] = "トーク25番" } } })
+  local M = load()
+  M._t.runExport(true)
+  local distinct, seen = 0, {}
+  for _, nm in ipairs(W.openLog) do if not seen[nm] then seen[nm] = true; distinct = distinct + 1 end end
+  check(#W.openLog == distinct, "開き直さない: " .. table.concat(W.openLog, ","))
+  check(has("トーク25番") and has("トーク19番") and #outFiles() == 20, "20 件: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("見直し 10/26 夜: 1回押しても開かなかった行は、もう1回押して開く（並び替わっても2回数えない）", function()
+  local list = numbered(30)
+  list[3].firstClickNoOpen = true
+  reset({ chats = list, knobs = { reorderAtOpens = { [5] = "トーク25番" } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(has("トーク3番") and has("トーク25番") and has("トーク19番") and #outFiles() == 20, "上位 20 件: " .. table.concat(outFiles(), ","))
+  check(line(hb, "ok: 20") and line(hb, "ng: 0"), "数:\n" .. hb)
+  safe()
+end)
+
+test("見直し 10/26 夜: 「トークを保存」が無いトークに新着が来て開き直しても、飛ばした数を2回数えない", function()
+  for _, k in ipairs({ { reorderAtOpens = { [5] = "トーク2番" } }, { moveOnOpen = { when = "トーク2番", name = "トーク2番", to = 1 } } }) do
+    local list = numbered(30)
+    list[2].menuItems = { "通知オフ", "トーク履歴を削除" }
+    reset({ chats = list, knobs = k })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    check(not hb:find("2 件飛ばした", 1, true), "飛ばしたのは1件:\n" .. hb)
+    local _, lines = namesTxt():gsub("トーク2番\t", "")
+    check(lines == 1, "names.txt に1回:\n" .. namesTxt())
+    check(#outFiles() == 20 and line(hb, "ng: 0"), "20 件: " .. table.concat(outFiles(), ","))
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜: ヘッダの読めないトーク（1字）の行を、並び替わってまた押しても失敗にしない", function()
+  for _, mv in ipairs({ { when = "母", name = "母", to = 1 }, { when = "母", name = "トーク2番", to = 7 } }) do
+    for _, retry in ipairs({ false, true }) do
+      local list = numbered(25)
+      list[3] = { name = "母" }
+      reset({ chats = list, knobs = { moveOnOpen = mv } })
+      if retry then retryAfter(list, 3) end
+      local M = load()
+      if retry then at9am(function() M._t.maybeRun() end) else M._t.runExport(true) end
+      local hb = heartbeat()
+      check(line(hb, "ng: 0") and line(hb, "ok: 20") and has("トーク20番"), mv.name .. (retry and "（やり直し）" or "") .. ": 失敗にせず 20 件目まで:\n" .. hb)
+      safe()
+    end
+  end
+end)
+
+test("見直し 10/26 夜: 20 件目の後で一覧が読めなくなっても、済んだ実行を失敗に数えない", function()
+  reset({ chats = numbered(25), knobs = { noTimesAfterSheet = 20 } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(#outFiles() == 20 and line(hb, "ok: 20") and line(hb, "ng: 0"), "20 件済んだ:\n" .. hb)
+  check((readfile(REPO .. "/mac/.last_result") or ""):find("\nng=0\n", 1, true), "次の版でやり直しを起こさない")
+  safe()
+end)
+
+test("見直し 10/26 夜: 押しても開かない行は、押し直してもヘッダが変わらなければ、今開いているトークと保存名で見分けて失敗にする", function()
+  local list = numbered(6)
+  list[3].noOpen = true
+  list[3].ocrRow = "トーク2番"                       -- 開かない行が、今開いているトークと同じに読める
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  -- 名前で見分けられない（同じ字）: 保存名も前のトークと同じなので、今開いているトークの行と
+  -- みなす（数えない）。黙って取りこぼすのは同じに読める2つの行の片方が開かない時だけ
+  check(line(hb, "ok: 5"), "ほかの5件は保存:\n" .. hb)
+  reset({ chats = numbered(6) })
+  W.chats[3].noOpen = true
+  M = load()
+  M._t.runExport(true)
+  hb = heartbeat()
+  check(line(hb, "ok: 5") and line(hb, "ng: 1") and hb:find("一覧の3番目: [トーク確認]", 1, true), "名前が違えば失敗:\n" .. hb)
+  check(opensOf("トーク3番") == 2, "押し直した: " .. table.concat(W.openLog, ","))
   safe()
 end)
 
