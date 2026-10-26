@@ -2025,6 +2025,9 @@ local function exportList(app, R)
         n = n - 1                                   -- 並び替わって同じトークをまた開いた: 数えない
       elseif r1 == "dup" then
         R.okN = R.okN + 1
+        -- 並び替わって同じトークをまた開いたら "dup-run" にして数えない（実機 10/26 21:22:
+        -- 保存済みのトークを2回数え、下の2件まで届かなかった）
+        if ctx.saveKey then thisRun[ctx.saveKey] = true end
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace, note = "（今日もう保存済み）" }
         R.list[#R.list + 1] = { n = idx, name = ctx.saveName or row.text, how = "今日もう保存済み" }
       elseif r1 then

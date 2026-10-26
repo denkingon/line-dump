@@ -2041,6 +2041,23 @@ test("実機 10/26: 保存したトークが下へ動いて済んだ行が1行�
   safe()
 end)
 
+test("実機 10/26 21:22: 今日もう保存済みのトークが並び替わってまた開いても、2回目は 20 件に数えない", function()
+  reset({ chats = numbered(25), knobs = { moveOnOpen = { when = "トーク3番", name = "トーク3番", to = 6 } } })
+  writefile(REPO .. "/mac/.last_run", TODAY .. "\n")
+  writefile(REPO .. "/mac/.last_result", "day=" .. TODAY .. "\nversion=v4.1-00000000\nng=1\nok=トーク3番\n")
+  local M = load()
+  at9am(function() M._t.maybeRun() end)
+  local opened3 = 0
+  for _, n in ipairs(W.openLog) do if n == "トーク3番" then opened3 = opened3 + 1 end end
+  check(opened3 == 2, "保存済みのトークを2回開く場面になっている: " .. table.concat(W.openLog, ","))
+  local _, inNames = namesTxt():gsub("トーク3番", "")
+  check(inNames == 1, "names.txt に1回だけ:\n" .. namesTxt())
+  check(has("トーク20番") and not has("トーク3番"), "下の行まで届き、保存済みは保存し直さない: " .. table.concat(outFiles(), ","))
+  local hb = heartbeat()
+  check(line(hb, "ok: 20") and line(hb, "ng: 0"), "合わせて 20 件:\n" .. hb)
+  safe()
+end)
+
 test("実機 10/26: 最初の行を押してもトーク欄が空のままなら、もう1回押して開く", function()
   local list = numbered(5)
   list[1].firstClickNoOpen = true
