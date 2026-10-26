@@ -1561,7 +1561,7 @@ local function saveAndMove(ctx, app, st)
     -- 字の読めない行が、最後に開いた行のすぐ上なら（一覧が動いて今開いているトークの位置が分から
     -- なくなっても）、選ばれて字が読めなくなった今開いているトークの行と見なしてよい
     if same and ctx.list.recheck and (ctx.list.rowSame or (ctx.list.atOpenPos and ctx.list.rowLike) or ctx.list.retryMisopen
-                                      or (ctx.list.nearOpen and rt == "")) then
+                                      or (ctx.list.nearOpen and (rt == "" or ctx.list.rowLike))) then
       same = false
       note(ctx, "保存ダイアログ", "押した行は今開いているトークの行だった")
     end
@@ -1988,7 +1988,7 @@ local function exportRow(app, ctx, win, row, prevHeader)
       -- 開いていたトークの行かもしれない）は含むまで。名前の読めない行は今開いているトークの位置だけ
       local okSkip
       if row.n == "" then okSkip = ctx.list.atOpenPos or ctx.list.nearOpen
-      else okSkip = rc == hc or (ctx.list.atOpenPos and (contains or head3(rc, hc))) or (ctx.list.firstRow and contains) end
+      else okSkip = rc == hc or ((ctx.list.atOpenPos or ctx.list.nearOpen) and (contains or head3(rc, hc))) or (ctx.list.firstRow and contains) end
       if not okSkip then
         return fail(ctx, "トーク確認", "押した行のトークが開かない（ヘッダが押す前のまま）", nil, headerSeen(hl))
       end
@@ -2284,10 +2284,13 @@ local function exportList(app, R)
     end
     -- 開いた行が見えている一番下の行だった等で上の確かめができない時も、一番上が見えていて、開いた
     -- 位置より上に開いたトークの字（含む）の行が1つだけあれば、それが一番上へ動いた開いたトーク
-    if not openPos and sc.offset == 0 and not notOpened and not stillNear(k) then
+    -- （すぐ下の行が新着の分だけ動いていれば、開いたトークは上へ動いていない。済んだことにするのは
+    -- 字がそのまま同じか、下の行が動いていない（見えている所の下から入ってきていない）時だけ）
+    if not openPos and sc.offset == 0 and not notOpened and not stillNear(k) and not (dBelow and dBelow >= k) then
       local a = openedAbove()
       if a and posOf(a.key) < p and looksOpened(a) == true then
-        openPos = posOf(a.key); mark(a.key); left = false
+        openPos = posOf(a.key); left = false
+        if rowKey(a) == ok0 or dBelow == 0 then mark(a.key) end
       end
     end
     for key in pairs(tried) do

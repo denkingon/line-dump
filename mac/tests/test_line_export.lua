@@ -2740,7 +2740,7 @@ end)
 
 test("見直し fuzz（見つかった種。FUZZ_FROM で範囲）", function()
   -- 普段は見つかったことのある種だけ流す。FUZZ_FROM〜FUZZ_TO を付けると、その範囲を全部流す
-  local seeds = { 149, 198, 353 }
+  local seeds = { 149, 198, 353, 453 }
   if realgetenv("FUZZ_FROM") then
     seeds = {}
     for k = tonumber(realgetenv("FUZZ_FROM")), tonumber(realgetenv("FUZZ_TO") or "200") do seeds[#seeds + 1] = k end
