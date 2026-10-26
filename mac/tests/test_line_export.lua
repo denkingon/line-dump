@@ -403,6 +403,7 @@ local function sheetEl()
       -- saveFailsOnce: そのトークでは1回目だけ「保存」を押しても保存されない（ダイアログが閉じない）
       local oc3 = W.open and chat(W.open)
       if oc3 and oc3.saveFailsOnce and not oc3.saveFailDone then oc3.saveFailDone = true; return end
+      if oc3 and oc3.saveFails then return end       -- saveFails: そのトークはいつも保存されない
       W.pressedSave = true
       if exists(p) then W.sheet.confirm = p; return end
       doSave(p)
@@ -3535,6 +3536,57 @@ test("見直し 10/26 夜（10）: 下へ送る間に上へ来たトークは、
     check(#miss == 0 and line(hb, "ng: 0"), "足りない " .. table.concat(miss, ",") .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n" .. hb)
     safe()
   end
+end)
+
+test("見直し 10/26 夜（11）: 保存で失敗したトークを新着で開き直しても、保存しないまま「保存済み」にして失敗を消さない", function()
+  for _, kind in ipairs({ "saveFails", "saveFailsOnce" }) do
+    local list = numbered(30)
+    list[3][kind] = true
+    reset({ chats = list, knobs = { reorderAtOpens = { [5] = "トーク3番" } } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local res = readfile(REPO .. "/mac/.last_result") or ""
+    if has("トーク3番") then
+      check(line(hb, "ng: 0") and namesTxt():find("失敗の後で開き直した: 保存した", 1, true), kind .. ": 開き直して保存できたら取り消す:\n" .. hb .. namesTxt())
+    else
+      check(line(hb, "ng: 1") and not res:find("\nng=0\n", 1, true), kind .. ": 保存できなければ失敗のまま:\n" .. hb)
+      check(not namesTxt():find("この実行で保存済み", 1, true), kind .. ": 保存済みと書かない:\n" .. namesTxt())
+      check(not has("トーク21番"), kind .. ": 21 番目を保存しない")
+    end
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（11）: 同じに読める別のトークの失敗を、もう片方の保存・失敗で取り消したり、まとめたりしない", function()
+  for _, pair in ipairs({ { "トーク会のグループA", "トーク会のグループB", "トーク会のグル…" }, { "トークパプリカ🍅", "トークパプリカ🌶️", nil } }) do
+    for _, bFails in ipairs({ false, true }) do
+      local list = numbered(30)
+      list[3] = { name = pair[1], ocrRow = pair[3], saveDead = true }
+      list[15] = { name = pair[2], ocrRow = pair[3], saveDead = bFails }
+      reset({ chats = list })
+      local M = load()
+      M._t.runExport(true)
+      local hb = heartbeat()
+      local tag = pair[1] .. (bFails and "/両方失敗" or "/B は保存") .. ": "
+      check(not has(pair[1]), tag .. "A は保存していない")
+      check(line(hb, bFails and "ng: 2" or "ng: 1"), tag .. "失敗の数:\n" .. hb)
+      check(not has("トーク21番"), tag .. "21 番目を保存しない: " .. table.concat(outFiles(), ","))
+      safe()
+    end
+  end
+end)
+
+test("見直し 10/26 夜（11）: 押した所に新着で別のトークが来て、そのトークの保存が失敗した時、押した行の保存で取り消さない", function()
+  local list = numbered(30)
+  list[25].saveFails = true
+  reset({ chats = list, knobs = { reorderBeforeRowClick = { [1] = "トーク25番" } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(not has("トーク25番") and line(hb, "ng: 1"), "25番の失敗は残す:\n" .. hb .. namesTxt())
+  check(has("トーク1番") and has("トーク19番"), "ほかの上位は保存: " .. table.concat(outFiles(), ","))
+  safe()
 end)
 
 test("実機 10/26: 最初の行を押してもトーク欄が空のままなら、もう1回押して開く", function()

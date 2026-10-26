@@ -2092,14 +2092,45 @@ local function exportList(app, R)
   local misopened = {}                              -- 押したら別のトークが開いた行
   -- さっき失敗した行を開き直して、そのトークだと確かめられた（保存した・今日保存済み・飛ばした等）:
   -- 失敗を取り消し、20 件に2回数えない
+  -- 失敗したトークの見分け（失敗を1回だけ数える・後で開き直せたら取り消すため）: 保存ダイアログが
+  -- 出ていれば保存名、ヘッダが変わっていればヘッダの名前。押した行が開かなかった失敗は、行の名前が
+  -- この実行で同じ画面に2回見えたこと（同じに読める別のトーク）が無い時だけ行の名前
+  local twins, posSeen = {}, {}                     -- 2つの位置に見えた行の名前（同じに読める別のトークかもしれない）
+  local function failId(row, ctx, r2, hdrBefore)
+    if r2 and r2.stage ~= "トーク確認" and ctx.saveKey then return "save:" .. ctx.saveKey end
+    if ctx.headerN and ctx.headerN ~= hdrBefore and not ctx.list.recheck
+       and not twins[rowKey({ n = ctx.headerN, text = "" })] and not (row.n ~= "" and twins[rowKey(row)]) then
+      return "hdr:" .. ctx.headerN
+    end
+    if r2 and r2.stage == "トーク確認" and row.n ~= "" and not twins[rowKey(row)] and not ctx.list.wrongRow then
+      return "row:" .. rowKey(row)
+    end
+    return nil
+  end
+  -- 開き直したトークが、前に失敗したトークだと分かる見分け（保存名・ヘッダ・行の名前）
+  local function okIds(row, ctx)
+    local t = {}
+    if ctx.saveKey then t[#t + 1] = "save:" .. ctx.saveKey end
+    if ctx.headerN and not twins[rowKey({ n = ctx.headerN, text = "" })] and not (row.n ~= "" and twins[rowKey(row)]) then
+      t[#t + 1] = "hdr:" .. ctx.headerN
+    end
+    if row.n ~= "" and not twins[rowKey(row)] then
+      local rk, hk = rowKey(row), ctx.headerN and rowKey({ n = ctx.headerN, text = "" })
+      if ctx.list.rowSame or (hk and hk ~= "" and (hk == rk or hk:find(rk, 1, true) or rk:find(hk, 1, true))) then
+        t[#t + 1] = "row:" .. rk
+      end
+    end
+    return t
+  end
   local function retract(row, ctx, how)
-    local f = row.n ~= "" and failed[rowKey(row)]
+    local f, id
+    for _, k in ipairs(okIds(row, ctx)) do if failed[k] then f, id = failed[k], k; break end end
     if not f then return end
-    failed[rowKey(row)] = nil
+    for k, v in pairs(failed) do if v == f then failed[k] = nil end end
     n = n - 1; R.ngN = R.ngN - 1
     for i, l in ipairs(R.ngLines) do if l == f.ng then table.remove(R.ngLines, i); break end end
     f.list.how = "失敗の後で開き直した: " .. how .. "（" .. idx .. " 番目）"
-    note(ctx, "一覧", "さっき失敗した行を開き直せたので、失敗を取り消す")
+    note(ctx, "一覧", "さっき失敗したトークを開き直せたので、失敗を取り消す")
   end
   local lastPos                                     -- 前に開いた行の位置
   local openedAt                                    -- 最後に開いた行の、押した時の位置（一覧が動いても捨てない）
@@ -2296,7 +2327,14 @@ local function exportList(app, R)
     end
     local row
     local cnt = {}
-    for _, r in ipairs(rows) do local k = rowKey(r); cnt[k] = (cnt[k] or 0) + 1 end
+    for _, r in ipairs(rows) do
+      local k, q = rowKey(r), posOf(keyOf(r))
+      cnt[k] = (cnt[k] or 0) + 1
+      -- 一覧が動いていない間（同じ epoch）に別の位置にも見えたら、同じに読める別のトーク
+      local ps = posSeen[k]
+      if cnt[k] > 1 or (ps and ps.e == epoch and ps.q ~= q) then twins[k] = true end
+      if not ps or ps.e ~= epoch then posSeen[k] = { q = q, e = epoch } end
+    end
     local function done(r)
       if not tried[r.key] then return false end
       local amb = r.n == "" or cnt[rowKey(r)] > 1
@@ -2330,6 +2368,7 @@ local function exportList(app, R)
                              -- トークが下へ動くと、開いたトークは1行上がる。まだ開いていない行は下にある）
                              nearOpen = lastPos == nil and openedAt ~= nil and posOf(row.key) == openedAt - 1,
                              retryMisopen = misopened[row.key] } }
+      local hdrBefore = prevHeader
       local okc, r1, r2 = pcall(exportRow, app, ctx, win, row, prevHeader)
       if not okc then
         if type(r1) == "table" and (r1.abort or r1.blocked) and sweep then
@@ -2364,10 +2403,10 @@ local function exportList(app, R)
       if not isSkip then skipsInRow = 0 end
       if r1 == "dup-run" then
         n = n - 1                                   -- 並び替わって同じトークをまた開いた: 数えない
-        if ctx.list.rowSame and ctx.saveKey and R.saved[ctx.saveKey] then retract(row, ctx, "この実行で保存済み") end
+        if ctx.saveKey and R.saved[ctx.saveKey] then retract(row, ctx, "この実行で保存済み") end
       elseif r1 == "dup" then
         R.okN = R.okN + 1
-        if ctx.list.rowSame then retract(row, ctx, "今日もう保存済み") end
+        retract(row, ctx, "今日もう保存済み")
         -- 並び替わって同じトークをまた開いたら "dup-run" にして数えない（実機 10/26 21:22:
         -- 保存済みのトークを2回数え、下の2件まで届かなかった）
         if ctx.saveKey then thisRun[ctx.saveKey] = true end
@@ -2377,14 +2416,14 @@ local function exportList(app, R)
         R.okN = R.okN + 1
         R.saved[ctx.saveKey] = true; thisRun[ctx.saveKey] = true
         if sweep then R.sweepN = (R.sweepN or 0) + 1 end
-        if ctx.list.rowSame then retract(row, ctx, "保存した") end
+        retract(row, ctx, "保存した")
         log("OK  一覧の " .. idx .. " 番目 → " .. shown)
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
                                       note = "→ " .. maskedSave(r1:match("[^/]+$") or r1) }
         R.list[#R.list + 1] = { n = idx, name = r1:match("[^/]+$") or r1, how = sweep and "保存した（20 件の後で新着で上へ来た）" or "保存した" }
       elseif isSkip and ctx.headerN and skipped[ctx.headerN] then
         local hk, rk = rowKey({ n = ctx.headerN, text = "" }), rowKey(row)
-        if row.n ~= "" and (hk == rk or hk:find(rk, 1, true) or rk:find(hk, 1, true)) then retract(row, ctx, "「トークを保存」が無い") end
+        retract(row, ctx, "「トークを保存」が無い")
         -- さっき飛ばしたトーク（新着で並び替わってまた開いた）: 飛ばした数にも names.txt にも
         -- もう一度は書かない
         if r2.imgPath then os.remove(r2.imgPath) end
@@ -2396,10 +2435,7 @@ local function exportList(app, R)
         -- 数えない。毎日のことなので撮影画像は最初の2件だけ残す。続けて SKIP_MAX 件あれば
         -- 「トークを保存」の読み方が変わったのかもしれないので、止めて失敗に書く
         if ctx.headerN then skipped[ctx.headerN] = true end
-        local hk, rk = rowKey({ n = ctx.headerN or "", text = "" }), rowKey(row)
-        if row.n ~= "" and ctx.headerN and (hk == rk or hk:find(rk, 1, true) or rk:find(hk, 1, true)) then
-          retract(row, ctx, "「トークを保存」が無い")
-        end
+        retract(row, ctx, "「トークを保存」が無い")
         R.skipN = R.skipN + 1; skipsInRow = skipsInRow + 1
         if r2.imgPath and R.skipN > 2 then os.remove(r2.imgPath) end
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
@@ -2411,7 +2447,7 @@ local function exportList(app, R)
             nil, r2.img and ("最初の画像: " .. r2.img) or nil)
           break
         end
-      elseif row.n ~= "" and failed[rowKey(row)] then
+      elseif failId(row, ctx, r2, hdrBefore) and failed[failId(row, ctx, r2, hdrBefore)] then
         -- さっき失敗した行（並び替わってまた開いた）がまた失敗: 失敗にも 20 件にも2回は数えない
         n = n - 1
         log("NG  一覧の " .. idx .. " 番目（" .. shown .. "）  さっきと同じ行がまた失敗（数えない）")
@@ -2423,10 +2459,13 @@ local function exportList(app, R)
         R.ngLines[#R.ngLines + 1] = ctx.name .. ": " .. describe(r2)
         R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace, e = r2 }
         R.list[#R.list + 1] = { n = idx, name = ctx.saveName or row.text, how = "失敗: " .. describe(r2) }
-        -- 名前が画面に1回だけの行だけ覚える（同じに読める別のトークの失敗をまとめない）
-        local same = 0
-        for _, b in ipairs(before) do if rowKey(b) == rowKey(row) then same = same + 1 end end
-        if row.n ~= "" and same == 1 then failed[rowKey(row)] = { list = R.list[#R.list], ng = R.ngLines[#R.ngLines] } end
+        local fid = failId(row, ctx, r2, hdrBefore)
+        if fid then
+          local rec = { list = R.list[#R.list], ng = R.ngLines[#R.ngLines] }
+          failed[fid] = rec
+          -- 保存名で失敗したトークは、開き直した時に行の名前でも分かるように（行の名前が保存名と同じ時）
+          if fid:sub(1, 5) == "save:" and row.n ~= "" and not twins[rowKey(row)] and ctx.list.rowSame then failed["row:" .. rowKey(row)] = rec end
+        end
       end
       if n >= LIST_TOP and not sweep and not sc.moved then break end   -- 20 件済んだ: 一覧を読み直さない
       if sweep then sweepN = sweepN + 1; if sweepN >= 5 then break end end
