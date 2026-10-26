@@ -337,8 +337,12 @@ local function click(pt)
       local ro = W.knobs.reorderAtOpens and W.knobs.reorderAtOpens[#W.openLog]
       if ro then
         W.knobs.reorderAtOpens[#W.openLog] = nil
-        for k, x in ipairs(W.chats) do
-          if x.name == ro then if k >= (W.knobs.insertAt or 1) then table.remove(W.chats, k); table.insert(W.chats, math.min(W.knobs.insertAt or 1, #W.chats + 1), x) end; break end
+        -- "@self" = 今開いたトーク、"@prev" = 前に開いたトーク、表なら順に
+        for _, one in ipairs(type(ro) == "table" and ro or { ro }) do
+          if one == "@self" then one = W.open elseif one == "@prev" then one = W.openLog[#W.openLog - 1] end
+          for k, x in ipairs(W.chats) do
+            if x.name == one then if k >= (W.knobs.insertAt or 1) then table.remove(W.chats, k); table.insert(W.chats, math.min(W.knobs.insertAt or 1, #W.chats + 1), x) end; break end
+          end
         end
       end
       -- 新着で別のトークが一覧の一番上に来る（reorderAtClick 回目に押した後）
@@ -2176,7 +2180,12 @@ test("見直し 10/26 夜: 始める前から開いていた（選ばれてい�
   local M = load()
   M._t.runExport(true)
   check(line(heartbeat(), "ok: 20") and line(heartbeat(), "ng: 0") and has("トーク20番"), "20 件:\n" .. heartbeat())
-  check(opensOf("トーク1番") == 1, "1番を1回だけ開く: " .. table.concat(W.openLog, ","))
+  -- 最初の行は押し直すことがある（1回目が効かなかった時のため）。次の行の後でまた開かない
+  local after2 = false
+  for _, nm in ipairs(W.openLog) do
+    if nm == "トーク2番" then after2 = true elseif after2 and nm == "トーク1番" then after2 = "again" end
+  end
+  check(after2 ~= "again", "2番の後で1番を開き直さない: " .. table.concat(W.openLog, ","))
   safe()
 end)
 
@@ -3609,6 +3618,214 @@ test("実機 10/27 02:41: 開いたトークの行をまた押した時、ヘッ
     check(line(hb, "ng: 0") and line(hb, "ok: 20") and has("トーク20番"), v.at .. ": 失敗にせず 20 件目まで:\n" .. hb .. "\n開いた順 " .. table.concat(W.openLog, ","))
     safe()
   end
+end)
+
+-- ===================== r4 find-miss =====================
+local function r4top(n) local t = {}; for i = 1, n do t[#t + 1] = W.chats[i].name end; return t end
+local function r4miss(names) local t = {}; for _, nm in ipairs(names) do if not has(nm) then t[#t + 1] = nm end end; return t end
+local function r4dump(tag)
+  local hb = heartbeat()
+  return tag .. " / 開いた順 " .. table.concat(W.openLog, ",") .. "\n保存 " .. table.concat(outFiles(), ",") .. "\n" .. hb ..
+    (realgetenv("R4V") and ("\n" .. namesTxt() .. "\n" .. table.concat(W.logs, "\n")) or "")
+end
+
+test("見直し 10/26 夜（12）r4 A: 始める前から開いていたトークの名前＋2字までの最初の行が1回目の押しで開かないと、その行を取りこぼし、前から開いていたトークを代わりに保存する", function()
+  for _, v in ipairs({ { top = "ゆうき", pre = "ゆう", at = 30 }, { top = "ゆうき", pre = "ゆう", at = 7 },
+                       { top = "トーク会の会", pre = "トーク会", at = 30 } }) do
+    local list = numbered(30)
+    list[1] = { name = v.top, firstClickNoOpen = true }
+    table.insert(list, v.at, { name = v.pre })
+    reset({ chats = list, open = v.pre })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local miss = r4miss(r4top(20))
+    check(#miss == 0 or line(hb, "ng: " .. #miss), r4dump("A " .. v.top .. "/" .. v.pre .. "@" .. v.at .. ": 取りこぼし(NG無し): " .. table.concat(miss, ",")))
+    check(v.at <= 20 or not has(v.pre), "A " .. v.top .. "/" .. v.pre .. ": 上位 20 件に無い前から開いていたトークを保存した")
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（12）r4 B: 下へ送る間に、済んだトークと同じに読める名前の別のトークが新着で一番上へ来ると、20 件の後の見直しで開かず、21 番目を保存する", function()
+  local pairs_ = {
+    { a = { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true },
+      b = { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true } },
+    { a = { name = "トーク会のグループA", ocrRow = "トーク会のグル…" },
+      b = { name = "トーク会のグループB", ocrRow = "トーク会のグル…" } },
+  }
+  for _, v in ipairs(pairs_) do
+    for _, at in ipairs({ 1, 4 }) do
+      local list = numbered(30)
+      table.insert(list, at, v.a)
+      table.insert(list, 28, v.b)
+      reset({ chats = list, knobs = { reorderAtDownScroll = { [1] = v.b.name } } })
+      local M = load()
+      M._t.runExport(true)
+      local hb = heartbeat()
+      local miss = r4miss(r4top(20))
+      check(#miss == 0 or line(hb, "ng: " .. #miss), r4dump("B " .. v.b.name .. " a@" .. at .. ": 取りこぼし(NG無し): " .. table.concat(miss, ",")))
+      safe()
+    end
+  end
+end)
+
+test("見直し 10/26 夜（12）r4 fuzzM（R4_FROM を付けた時だけ）", function()
+  if not realgetenv("R4_FROM") then return end
+  local FROM = tonumber(realgetenv("R4_FROM") or "1")
+  local TO = tonumber(realgetenv("R4_TO") or "200")
+  local NOTWINS = realgetenv("R4_NOTWINS")
+  local NOFCNO = realgetenv("R4_NOFCNO")
+  for seed = FROM, TO do
+    math.randomseed(seed)
+    local R = math.random
+    local list = numbered(34)
+    local desc = {}
+    local pinned = R(1, 3) == 1
+    local knobs = {}
+    if pinned then knobs.insertAt = 3; desc[#desc + 1] = "pinned2" end
+    for i = 2, 26 do
+      local c = list[i]
+      local u = R(1, 100)
+      if u <= 10 then c.ocrRowOpen = ""; desc[#desc + 1] = c.name .. ".open=''"
+      elseif u <= 20 then c.ocrRowOpen = c.name .. "ミ"; desc[#desc + 1] = c.name .. ".open=ミ"
+      elseif u <= 26 then c.ocrRow = c.name .. "(123)"; c.ocrRowOpen = c.name; desc[#desc + 1] = c.name .. ".(123)"
+      elseif u <= 32 then c.ocrRow = c.name .. " 3"; c.ocrRowAfterOpen = c.name; desc[#desc + 1] = c.name .. ".unread" end
+      if R(1, 100) <= 10 then c.ocrHeader = c.name .. " ゆう"; desc[#desc + 1] = c.name .. ".hdr" end
+    end
+    if not NOTWINS then
+      if R(1, 4) == 1 then local at = R(1, 22); table.insert(list, at, { name = "🐱", ocrRow = "", ocrHeader = "" }); desc[#desc + 1] = "🐱@" .. at end
+      if R(1, 4) == 1 then
+        local a, b = R(1, 22), R(1, 34)
+        table.insert(list, a, { name = "トーク会のグループA", ocrRow = "トーク会のグル…" })
+        table.insert(list, b, { name = "トーク会のグループB", ocrRow = "トーク会のグル…" })
+        desc[#desc + 1] = "grpA@" .. a .. ",grpB@" .. b
+      end
+    end
+    if R(1, 4) == 1 then local at = R(1, 22); table.insert(list, at, { name = "母" }); desc[#desc + 1] = "母@" .. at end
+    local skips = {}
+    if R(1, 4) == 1 then
+      local at = R(2, 20)
+      skips[list[at].name] = true
+      list[at].menuItems = { "通知オフ", "トーク履歴を削除" }; desc[#desc + 1] = "skip=" .. list[at].name
+    end
+    if R(1, 3) == 1 then
+      local k = R(3, 19)
+      local nameIdx = k - R(0, 2)
+      local mv = { when = list[k].name, name = list[nameIdx].name, to = k + R(1, 5) }
+      knobs.moveOnOpen = mv; desc[#desc + 1] = "move(" .. mv.when .. ":" .. mv.name .. "->" .. mv.to .. ")"
+    end
+    knobs.reorderAtOpens = {}
+    for _ = 1, R(1, 4) do
+      local j = R(1, 20)
+      local u = R(1, 10)
+      local nm = u <= 3 and "@self" or u <= 5 and "@prev" or list[R(pinned and 3 or 2, #list)].name
+      if R(1, 6) == 1 then nm = { nm, list[R(pinned and 3 or 2, #list)].name } end
+      knobs.reorderAtOpens[j] = nm
+      desc[#desc + 1] = "ro[" .. j .. "]=" .. (type(nm) == "table" and table.concat(nm, "+") or nm)
+    end
+    if R(1, 3) == 1 then
+      knobs.reorderAtDownScroll = {}
+      for _ = 1, R(1, 2) do
+        local j = R(1, 3)
+        local nm = list[R(10, #list)].name
+        knobs.reorderAtDownScroll[j] = nm; desc[#desc + 1] = "rds[" .. j .. "]=" .. nm
+      end
+    end
+    if R(1, 4) == 1 then
+      knobs.reorderBeforeRowClick = {}
+      local j = R(1, 18)
+      local nm = list[R(pinned and 3 or 2, #list)].name
+      knobs.reorderBeforeRowClick[j] = nm; desc[#desc + 1] = "rb[" .. j .. "]=" .. nm
+    end
+    local openName
+    if R(1, 4) == 1 then openName = list[R(1, 30)].name; desc[#desc + 1] = "preopen=" .. openName end
+    if not NOFCNO and R(1, 5) == 1 then local i = R(1, 20); list[i].firstClickNoOpen = true; desc[#desc + 1] = "fcno=" .. list[i].name end
+    if realgetenv("R4_NOOPEN") then local i = R(2, 20); list[i].noOpen = true; desc[#desc + 1] = "noOpen=" .. list[i].name end
+    local mvName = knobs.moveOnOpen and knobs.moveOnOpen.name
+    reset({ chats = list, knobs = knobs, open = openName })
+    local M = load()
+    local ok, err = pcall(function() M._t.runExport(true) end)
+    local final = {}
+    for _, c in ipairs(W.chats) do if not c.hidden then final[#final + 1] = c.name end end
+    local limit = 20
+    if mvName and has(mvName) then
+      local inTop = false
+      for i = 1, 20 do if final[i] == mvName then inTop = true end end
+      if not inTop then limit = 19 end
+    end
+    local missing, want = {}, 0
+    for _, nm in ipairs(final) do
+      if want >= limit then break end
+      if not skips[nm] then
+        want = want + 1
+        if not has(nm) then missing[#missing + 1] = nm end
+      end
+    end
+    local hb = heartbeat()
+    local okN = tonumber(hb:match("\nok: (%d+)")) or -1
+    local ngN = tonumber(hb:match("\nng: (%d+)")) or -1
+    local bad = {}
+    if not ok then bad[#bad + 1] = "例外 " .. tostring(type(err) == "table" and (err.abort or err.blocked) or err) end
+    if #missing > ngN then bad[#bad + 1] = "取りこぼし(NG無し) " .. table.concat(missing, ",") .. " ng=" .. ngN end
+    if okN ~= #outFiles() then bad[#bad + 1] = "ok数 " .. okN .. " ≠ 保存 " .. #outFiles() end
+    for _, s in ipairs(W.menuClicked) do if s ~= "トークを保存" then bad[#bad + 1] = "メニュー " .. s end end
+    if #bad > 0 then
+      check(false, "seed " .. seed .. ": " .. table.concat(bad, " / ") .. "\n    設定: " .. table.concat(desc, " ") ..
+        "\n    開いた順: " .. table.concat(W.openLog, ",") .. "\n    最終: " .. table.concat(final, ",", 1, 22) ..
+        "\n    hb: " .. hb:gsub("\n", " | ") .. (realgetenv("R4V") and ("\n" .. namesTxt() .. "\n" .. table.concat(W.logs, "\n")) or ""))
+    end
+  end
+end)
+
+test("見直し 10/26 夜（12）r4 C: 開いたトーク（選ばれると字が変わる）と下の別のトークに続けて新着が来ると、開いたトークの行をまた押して失敗に数える", function()
+  for _, v in ipairs({ { at = 1, ro = { "トーク25番", "@self" } }, { at = 5, ro = { "トーク25番", "@self" } },
+                       { at = 1, ro = { "@self", "トーク25番" } } }) do
+    local list = numbered(30)
+    list[v.at].ocrRowOpen = list[v.at].name .. "ミ"
+    reset({ chats = list, knobs = { reorderAtOpens = { [v.at] = v.ro } } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local miss = r4miss(r4top(20))
+    local tag = "C at=" .. v.at .. " " .. table.concat(v.ro, "+") .. ": "
+    check(#miss == 0 or line(hb, "ng: " .. #miss), r4dump(tag .. "取りこぼし(NG無し): " .. table.concat(miss, ",")))
+    check(line(hb, "ng: 0") and #miss == 0, r4dump(tag .. "保存できたトークを失敗に数え、20 番目を保存しない: " .. table.concat(miss, ",")))
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（12）r4 F: 押す直前にそのトークに新着が来て一番上へ動き、押した所の済んだ別のトークが開くと、一番上へ動いたそのトークを開いたことにして取りこぼす", function()
+  for _, v in ipairs({
+    { ro = { [3] = "トーク25番" }, rb = { [5] = "トーク4番" }, who = "トーク4番" },          -- 新着で上に来たトークを開いた後
+    { ro = { [3] = "@self" }, rb = { [4] = "トーク4番" }, who = "トーク4番" },              -- 開いたトークが一番上へ動いた後
+    { ro = { [6] = "トーク25番" }, rb = { [8] = "トーク7番" }, who = "トーク7番", pinned = true },
+  }) do
+    local list = numbered(30)
+    reset({ chats = list, knobs = { reorderAtOpens = v.ro, reorderBeforeRowClick = v.rb, insertAt = v.pinned and 3 or nil } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    local miss = r4miss(r4top(20))
+    local tag = "F " .. v.who .. (v.pinned and " ピン留め" or "") .. ": "
+    check(has(v.who), r4dump(tag .. v.who .. " を保存していない"))
+    check(#miss == 0 or line(hb, "ng: " .. #miss), r4dump(tag .. "取りこぼし(NG無し): " .. table.concat(miss, ",")))
+    safe()
+  end
+end)
+
+test("見直し 10/26 夜（12）r4 F2: 押す直前にそのトークに新着が来て一番上へ動き、押した所の「トークを保存」の無いトークが開いても、そのトークを取りこぼす", function()
+  local list = numbered(30)
+  list[3].menuItems = { "通知オフ", "トーク履歴を削除" }
+  reset({ chats = list, knobs = { reorderAtOpens = { [4] = "@self" }, reorderBeforeRowClick = { [5] = "トーク5番" } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  local top = {}
+  for _, c in ipairs(W.chats) do if c.name ~= "トーク3番" and #top < 20 then top[#top + 1] = c.name end end
+  local miss = r4miss(top)
+  check(has("トーク5番"), r4dump("F2: トーク5番 を保存していない"))
+  check(#miss == 0 or line(hb, "ng: " .. #miss), r4dump("F2: 取りこぼし(NG無し): " .. table.concat(miss, ",")))
+  safe()
 end)
 
 test("実機 10/26: 最初の行を押してもトーク欄が空のままなら、もう1回押して開く", function()

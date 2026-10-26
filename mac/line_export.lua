@@ -1929,14 +1929,7 @@ local function exportRow(app, ctx, win, row, prevHeader)
       -- 押してしまう）。見つからなければ押し直さない
       -- （名前が画面に1回だけなら、1行ずれた所まで探す。同じに読める行がある時は同じ位置だけ）
       local again
-      -- 最初の行は、行の名前がヘッダの名前を含む・含まれるなら押す前から開いていたトークの行
-      -- なので押し直さない（保存名で確かめる）
-      local preOpen = false
-      if ctx.list.firstRow and hl[1] and row.n ~= "" then
-        local rc, hc = rowKey(row), rowKey({ n = hl[1].n, text = "" })
-        preOpen = hc ~= "" and (rc == hc or (rc:sub(1, #hc) == hc and (utf8.len(rc) or 99) - (utf8.len(hc) or 0) <= 2))
-      end
-      if not reclicked and not preOpen then
+      if not reclicked then                         -- 最初の行も押し直す（押す前から開いていたトークの行でも害は無い）
         reclicked = true
         local key, best, same = rowKey(row), nil, 0
         local g = ctx.list.gap or 70
@@ -2285,6 +2278,20 @@ local function exportList(app, R)
         if lk == true then mark(a.key) end
       end
     end
+    -- 開いたトークの字が変わり（選ばれた色）、開いた位置から上に押す前に無かった字の行がいくつか
+    -- ある時（開いたトークと別のトークの両方に新着が来た）: 開いた位置から k 行下までの、押す前に
+    -- 無かった字の行の中で開いたトークの名前を含む行が1つだけで、字の読めない新しい行が無ければ、
+    -- それが開いたトーク（名前を含む別のトークが来ていれば2つになるので決めない）
+    if not openPos and not notOpened and not inAfter[ok0] and sc.offset == 0 then
+      local cand, nTrue, nUnread = nil, 0, 0
+      for _, a in ipairs(after) do
+        if posOf(a.key) <= p + k and not inBefore[rowKey(a)] then   -- 開いた行は新着の分（k）下がっているかもしれない
+          local lk = looksOpened(a)
+          if lk == true then nTrue = nTrue + 1; cand = a elseif lk == "unread" then nUnread = nUnread + 1 end
+        end
+      end
+      if nTrue == 1 and nUnread == 0 then openPos = posOf(cand.key); mark(cand.key); left = false end
+    end
     -- 開いた行が見えている一番下の行だった等で上の確かめができない時も、一番上が見えていて、開いた
     -- 位置より上に開いたトークの字（含む）の行が1つだけあれば、それが一番上へ動いた開いたトーク
     -- （すぐ下の行が新着の分だけ動いていれば、開いたトークは上へ動いていない。済んだことにするのは
@@ -2317,7 +2324,7 @@ local function exportList(app, R)
   -- 超えてよい。多くても 5 件）
   local seen, sweep, sweepN, sweepUpTo, sweptRaw = {}, false, 0, nil, {}
   local function sweepPick(r)                       -- 見直しで開く行: 一度も開かなかった名前・名前の読めない行・20 件目で来た新着
-    if r.n == "" or not openedNames[rowKey(r)] then return true end
+    if r.n == "" or not openedNames[rowKey(r)] or twins[rowKey(r)] then return true end   -- 同じに読める名前は保存名で確かめる
     return sweepUpTo ~= nil and posOf(r.key) <= sweepUpTo
   end
   while rows and (n < LIST_TOP or sweep) do
@@ -2483,7 +2490,14 @@ local function exportList(app, R)
         -- 押した行が開かなかった（今開いているトークは前のまま）: 開いた行として扱わない
         local notOpened = not r1 and r2 ~= nil and r2.stage == "トーク確認"
         if not notOpened and not ctx.list.wrongRow and r1 ~= "dup-run" then openedAt = posOf(row.key) end
-        local f = follow(before, rows, row, ctx, notOpened)
+        -- 押した行と別のトークが開いた（押した所に別のトークが来ていた）時も、開いた行として扱わない
+        local function looseAgree(a, b)
+          a, b = rowKey({ n = a, text = "" }), rowKey({ n = b, text = "" })
+          return a ~= "" and b ~= "" and (a == b or a:find(b, 1, true) ~= nil or b:find(a, 1, true) ~= nil)
+        end
+        local otherChat = ctx.list.wrongRow or (not r1 and not ctx.list.rowMatched and not ctx.list.recheck and ctx.headerN ~= nil
+                          and ctx.headerN ~= hdrBefore and row.n ~= "" and not looseAgree(row.n, ctx.headerN))
+        local f = follow(before, rows, row, ctx, notOpened or otherChat)
         if notOpened then
           if f.k or f.stale then lastPos = nil end  -- 一覧が動いたら前のトークの位置は分からない
         elseif ctx.list.wrongRow then lastPos = posOf(row.key)   -- 押した所に来ていた別のトークが開いている
@@ -2494,6 +2508,7 @@ local function exportList(app, R)
         if (f.k and sc.offset > 0) or after20 then
           if after20 and not sweep then
             sweep = true
+            epoch = epoch + 1                       -- 送る間に紛れた並び替わりがあるかもしれない（位置での印は当てにしない）
             note(ctx, "一覧", "20 件済んだ。下へ送っている間に新着で上へ来たトークが無いか、一番上を見る")
           end
           if after20 then
