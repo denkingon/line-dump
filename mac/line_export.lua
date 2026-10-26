@@ -2119,19 +2119,60 @@ local function endRun()
   pcall(function() hs.axuielement.systemWideElement():setTimeout(AX_TIMEOUT_AFTER) end)
 end
 
+-- ---------- ネットにつなぐ処理の時間の上限 ----------
+-- 実機 10/25: Mac は起きていたのに、04:01 を最後に status.txt も書き出しも止まった。
+-- 次の自動更新（04:11 ごろ）の git pull が、画面が消えた後に通信が止まったまま返らず、
+-- Hammerspoon 全体が止まったとみられる（hs.execute は終わるまで返らず、その間は
+-- タイマーも動かない）。ネットにつなぐ git と sync.sh は、時間を区切って打ち切る。
+-- 子のプロセスを別のグループにして、時間切れならグループごと止める（git の子の
+-- git-remote-https が出力を握ったまま残ると、打ち切っても hs.execute が返らないため）。
+-- git 自身にも、通信が止まったら諦める・パスワードを聞かない設定を渡す
+-- （本体の local は 200 個までなので、まとめて NET に持つ）
+local NET = {
+  ENV = "export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 " ..
+    "GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2'; ",
+  MARK = "LINE_DUMP_TIMEOUT",
+  PULL = 120, PUSH = 120, SYNC = 600, LOCAL = 30, -- 秒（LOCAL はネットを使わない git）
+}
+NET.PL = '$s=shift;$c=shift;$p=fork;if(!defined $p){exec("/bin/sh","-c",$c)}' ..
+  'if(!$p){setpgrp(0,0);exec("/bin/sh","-c",$c);exit 127}' ..
+  '$SIG{ALRM}=sub{kill("KILL",-$p);print "' .. NET.MARK .. '\n";exit 124};alarm $s;waitpid($p,0);exit($?>>8)'
+-- ログインシェル（git や python の PATH のため）も時間の内側で起こす。hs.execute の
+-- 第2引数 true は使わない（命令を "…" で囲むだけで中身を逃がさないので、$ や " を含む
+-- この命令が壊れる。シェルの起動が固まった時も打ち切れるように）
+function NET.limited(cmd, secs)
+  local login = (os.getenv("SHELL") or "/bin/zsh") .. " -l -i -c " .. sh(NET.ENV .. cmd)
+  if hs.fs.attributes("/usr/bin/perl", "mode") ~= "file" then return login end
+  return "/usr/bin/perl -e " .. sh(NET.PL) .. " " .. math.floor(secs) .. " " .. sh(login)
+end
+-- 時間の上限つきで git などを動かす。戻り値は hs.execute と同じ（出力, 成功したか）
+function NET.run(cmd, secs) return hs.execute(NET.limited(cmd, secs)) end
+function NET.timedOut(out) return (out or ""):find(NET.MARK, 1, true) ~= nil end
+-- 打ち切った git が残した鍵（.git/index.lock）を消す。残ると次から git が全部失敗し、
+-- 自動更新も取り込みも止まったままになる（打ち切ったのは自分の git だけなので消してよい）
+function NET.dropStaleLock()
+  if hs.fs.attributes(REPO .. "/.git/index.lock", "mode") then
+    os.remove(REPO .. "/.git/index.lock")
+    log("warn: 打ち切った git が残した .git/index.lock を消した")
+  end
+end
+
 -- 書き出した txt を取り込んで push する。第2引数の true は「ログインシェルの
 -- 環境を使う」指定。これが無いと PATH が最小限になり、git や python が
 -- 見つからないことがある。
 -- 戻り値: "push済" / "変更なし" / "push できず"（詳しくは mac/sync.log）。
 -- sync.sh の出力には取り込んだファイル名（トーク名）が入るので、コンソールには結果だけ出す。
 local function runSync()
-  local out = hs.execute('/bin/bash "' .. REPO .. '/mac/sync.sh" 2>&1', true) or ""
+  local out = NET.run("/bin/bash " .. sh(REPO .. "/mac/sync.sh") .. " 2>&1", NET.SYNC) or ""
   local r
-  if out:find("push 完了", 1, true) then r = "push済"
+  if NET.timedOut(out) then
+    NET.dropStaleLock()
+    r = "push できず（" .. NET.SYNC // 60 .. " 分で打ち切った）"
+  elseif out:find("push 完了", 1, true) then r = "push済"
   elseif out:find("変更なし", 1, true) or out:find("取り込む txt が無い", 1, true) then r = "変更なし"
   elseif out:find("公開になっているので", 1, true) then r = "GitHub が公開なので push しない"
   else r = "push できず" end
-  log("sync: " .. r .. (r == "push できず" and ("（理由は " .. tidy(REPO) .. "/mac/sync.log）") or ""))
+  log("sync: " .. r .. (r:find("push できず", 1, true) and ("（理由は " .. tidy(REPO) .. "/mac/sync.log）") or ""))
   return r
 end
 
@@ -2311,7 +2352,7 @@ end
 
 -- ---------- 状態の表示（status と診断ファイル）----------
 local function gitBranch()
-  local out = hs.execute("git -C " .. sh(REPO) .. " symbolic-ref --short -q HEAD 2>/dev/null", true)
+  local out = NET.run("git -C " .. sh(REPO) .. " symbolic-ref --short -q HEAD 2>/dev/null", NET.LOCAL)
   return (((out or ""):match("([^\r\n]+)[\r\n]*$") or ""):gsub("%s", ""))
 end
 local function displaySleepMin()
@@ -2496,7 +2537,7 @@ local function tryOne(name, dry)
   log("OK  " .. name .. " → " .. tidy(e))
   local pushed = runSync()
   out("=== OK: " .. file .. " を書き出した / " .. pushed .. " ===")
-  if pushed == "push できず" then
+  if pushed:find("push できず", 1, true) then
     out("    push できなかった（書き出したファイルは Linetxt にある）。理由は " .. tidy(REPO) .. "/mac/sync.log")
   end
   return finish("書き出しOK: " .. name .. " / " .. pushed)
@@ -2608,7 +2649,7 @@ local function runExport(auto)
   local pushed = runSync()
   hs.alert.show(string.format("LINE書き出し OK:%d NG:%d%s / %s", okN, ngN,
     stopped and (" 中断") or "", pushed), 4)
-  if not auto and (ngN > 0 or stopped or pushed == "push できず") then
+  if not auto and (ngN > 0 or stopped or pushed:find("push できず", 1, true)) then
     pcall(function() hs.openConsole(true) end)
   end
   return stopped and "aborted" or "done", stopped or (ngN .. " 件失敗")
@@ -2735,7 +2776,7 @@ local function inRebase()
 end
 local function recoverRebase()
   if not inRebase() then return end
-  hs.execute("git -C " .. sh(REPO) .. " rebase --abort 2>&1", true)
+  NET.run("git -C " .. sh(REPO) .. " rebase --abort 2>&1", NET.LOCAL)
   log("自動更新: 途中で止まっていた積み直しを取り消した")
 end
 
@@ -2748,19 +2789,25 @@ end
 -- 戻り値: true / false, 理由
 local function pullLatest()
   local git = "git -C " .. sh(REPO) .. " "
-  local out, ok = hs.execute(git .. "pull --ff-only -q origin main 2>&1", true)
+  local out, ok = NET.run(git .. "pull --ff-only -q origin main 2>&1", NET.PULL)
   if ok then return true end
-  local dirty = hs.execute(git .. "status --porcelain --untracked-files=no 2>&1", true) or ""
+  if NET.timedOut(out) then
+    NET.dropStaleLock()
+    return false, "git pull が " .. NET.PULL .. " 秒で終わらないので打ち切った（通信が止まっている）"
+  end
+  local dirty = NET.run(git .. "status --porcelain --untracked-files=no 2>&1", NET.LOCAL) or ""
   if dirty:match("%S") then
     return false, tidy((out or ""):gsub("%s+", " ")):sub(1, 160) .. "（手元に書き換えがあるので積み直さない）"
   end
-  local out2, ok2 = hs.execute(git .. "pull --rebase -q origin main 2>&1", true)
+  local out2, ok2 = NET.run(git .. "pull --rebase -q origin main 2>&1", NET.PULL)
   if ok2 then
     log("自動更新: 手元に送れていなかった取り込みを、GitHub の新しい版の上に積み直した")
-    hs.execute(git .. "push -q origin main 2>&1", true)   -- 失敗しても次の sync.sh で送る
+    -- 失敗しても次の sync.sh で送る
+    if NET.timedOut(NET.run(git .. "push -q origin main 2>&1", NET.PUSH)) then NET.dropStaleLock() end
     return true
   end
-  if inRebase() then hs.execute(git .. "rebase --abort 2>&1", true) end
+  if NET.timedOut(out2) then NET.dropStaleLock() end
+  if inRebase() then NET.run(git .. "rebase --abort 2>&1", NET.LOCAL) end
   return false, tidy(((out or "") .. " / " .. (out2 or "")):gsub("%s+", " ")):sub(1, 200)
 end
 
@@ -3097,6 +3144,7 @@ M._t = {
   exportOne = exportOne, runExport = runExport, prepareApp = prepareApp,
   beginRun = beginRun, endRun = endRun, maybeRun = maybeRun, describe = describe, tidy = tidy,
   statusLines = statusLines, readResult = readResult, selfUpdate = selfUpdate,
+  NET = NET, runSync = runSync, pullLatest = pullLatest,
   tick = tick, writeStatus = writeStatus, remember = remember, STATUS_EVERY = STATUS_EVERY,
   sleptThrough = sleptThrough, notePower = notePower,
   L = L, targets = TARGETS, OUT_DIR = OUT_DIR, REPO = REPO, DEBUG_DIR = DEBUG_DIR,

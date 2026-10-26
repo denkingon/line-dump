@@ -42,7 +42,9 @@ class TestSyncSh(unittest.TestCase):
                         # 本物の GitHub には決してつながない（origin を GitHub の URL にする
                         # テストで sync.sh の歯止めが効かなかった時に、試験の commit が本物に
                         # push されたことがある）。ローカルの bare origin だけ使える
-                        GIT_ALLOW_PROTOCOL="file")
+                        GIT_ALLOW_PROTOCOL="file",
+                        # 試験を走らせる人の ~/.gitconfig（commit の署名など）に左右されない
+                        GIT_CONFIG_GLOBAL=os.devnull)
         self.git("init", "-q", "--bare", "-b", "main", str(self.origin), cwd=self.tmp)
         self.work.mkdir()
         for rel in ("scripts/ingest.py", "scripts/line_parser.py", "mac/sync.sh", ".gitignore"):

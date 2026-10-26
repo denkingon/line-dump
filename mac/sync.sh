@@ -16,6 +16,13 @@ REPO="${LINE_DUMP_REPO:-$HOME/Document/line-dump}"
 RAW_DIR="${LINE_DUMP_RAW_DIR:-$HOME/Library/CloudStorage/Dropbox-SFC-CNS/Ryo Murata/Backups/Linetxt}"
 
 PY="${LINE_DUMP_PYTHON:-/usr/bin/python3}"
+
+# 通信が止まったまま git が返らないことがないように（実機 10/25: 自動更新の git pull が
+# 返らず Hammerspoon ごと止まったとみられる）。止まったら30秒で諦め、パスワードも聞かない
+export GIT_TERMINAL_PROMPT=0
+export GIT_HTTP_LOW_SPEED_LIMIT="${GIT_HTTP_LOW_SPEED_LIMIT:-1000}"
+export GIT_HTTP_LOW_SPEED_TIME="${GIT_HTTP_LOW_SPEED_TIME:-30}"
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2}"
 LOG="$REPO/mac/sync.log"
 
 # 画面には必ず出し、ログファイルは書ける時だけ追記する

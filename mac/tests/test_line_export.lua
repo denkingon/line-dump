@@ -467,8 +467,11 @@ local appObj = {
   end,
 }
 
-local function execute(cmd)
+local function execute(cmd, userEnv)
   W.cmds[#W.cmds + 1] = cmd
+  -- 本物の hs.execute(cmd, true) は $SHELL -l -i -c "cmd" で、中身を逃がさない。
+  -- " や $ や改行を含む命令はそこで壊れる（10/26 の見直しで見つかった）
+  if userEnv and cmd:find('["$\n`]') then W.brokenUserEnv = (W.brokenUserEnv or 0) + 1 end
   local x, y, w, h, path = cmd:match("screencapture %-x %-R (%-?%d+),(%-?%d+),(%d+),(%d+) '(.-)'$")
   if x then
     if W.knobs.noCapture then return "", false end
@@ -504,6 +507,7 @@ local function execute(cmd)
   end
   if cmd:match("sync%.sh") then
     W.synced = W.synced + 1
+    if W.knobs.syncTimeout then return "LINE_DUMP_TIMEOUT\n", false end
     if W.knobs.syncThrows then error("sync boom", 0) end
     if W.knobs.syncOut then return W.knobs.syncOut, true end
     if W.knobs.syncFails then return "error: push に失敗。ネットワークか認証を確認する\n", true end
@@ -512,6 +516,7 @@ local function execute(cmd)
   if cmd:match("symbolic%-ref") then return (W.knobs.branch or "main") .. "\n", true end
   if cmd:match("pull %-%-ff%-only") then
     W.pulled = true
+    if W.knobs.pullTimeout then return "LINE_DUMP_TIMEOUT\n", false end
     if W.knobs.pullFails then return "error: Your local changes to the following files would be overwritten by merge:\n", false end
     if W.knobs.pullDiverged then return "fatal: Not possible to fast-forward, aborting.\n", false end
     if W.knobs.appendOnPull then appendCopyFake(W.knobs.appendOnPull); W.knobs.appendOnPull = nil end
@@ -3526,6 +3531,113 @@ test("状態: 書き出した後の status.txt にもトーク名を入れない
   local st = status()
   check(st:find("why: 定期", 1, true) and st:find("今日の書き出し: 済み", 1, true), "書き出し後の状態:\n" .. st)
   for _, n in ipairs({ "Berry", "Cherry", "Dango" }) do check(not st:find(n, 1, true), n .. " を入れない:\n" .. st) end
+end)
+
+-- ===================== ネットにつなぐ処理の時間の上限（2026-10-26）=====================
+-- 実機 10/25: Mac は起きていたのに 04:01 を最後に止まった。自動更新の git pull が
+-- 通信の止まったまま返らず、Hammerspoon 全体が止まったとみられる
+-- hs.execute(cmd)（第2引数なし）と同じく io.popen で動かす。対話のログインシェルの
+-- 警告（標準エラー）は見ない
+local function realRun(c)
+  local t0 = os.time()
+  local p = io.popen(c .. " 2>/dev/null"); local o = p:read("a"); local _, _, code = p:close()
+  return o, code, os.time() - t0
+end
+
+test("時間の上限: 本物のシェルで、時間切れなら孫のプロセスごと打ち切って戻る", function()
+  reset()
+  local M = load()
+  local NET = M._t.NET
+  local o, code, dt = realRun("unset GIT_TERMINAL_PROMPT GIT_HTTP_LOW_SPEED_TIME; " ..
+    NET.limited("echo hi; echo \"$GIT_TERMINAL_PROMPT/$GIT_HTTP_LOW_SPEED_TIME\"; exit 3", 5))
+  check(o == "hi\n0/30\n" and code == 3, "普通に終われば出力と終わり方はそのまま（git の設定も渡す）: " .. o .. " " .. tostring(code))
+  o, code, dt = realRun(NET.limited("(sleep 31.7 &); sleep 31.7", 2))
+  check(NET.timedOut(o) and code == 124 and dt <= 4, "時間切れで戻る（出力を握った孫がいても）: " .. o .. " " .. tostring(code) .. " " .. dt .. "s")
+  local left = realRun("for i in 1 2 3 4 5 6; do pgrep -f 'slee[p] 31.7' >/dev/null || { echo none; exit; }; sleep 0.5; done; pgrep -fa 'slee[p] 31.7'")
+  check(left == "none\n", "孫のプロセスも残さない: " .. left)
+  o = realRun(NET.limited("echo \"$GIT_SSH_COMMAND\"", 5))
+  check(o:find("BatchMode=yes", 1, true) and o:find("ConnectTimeout=20", 1, true), "ssh も止まったら諦める: " .. o)
+  o, code = realRun(NET.limited("printf '%s\\n' \"it's ok\"", 5))
+  check(o == "it's ok\n" and code == 0, "引用符を含む命令もそのまま: " .. o)
+end)
+
+test("時間の上限: 本物の git で、上限つきの pull が取り込める（ログインシェル経由・第2引数なし）", function()
+  reset()
+  local M = load()
+  local base = ROOT .. "/realgit"
+  run("rm -rf " .. sh(base) .. " && mkdir -p " .. sh(base))
+  local g = "cd " .. sh(base) .. " && git init -q --bare -b main origin.git && git clone -q origin.git a && " ..
+    "cd a && git -c user.name=t -c user.email=t@e commit -q --allow-empty -m one && git push -q origin main && " ..
+    "cd .. && git clone -q origin.git b && cd a && git -c user.name=t -c user.email=t@e commit -q --allow-empty -m two && git push -q origin main"
+  run("{ export GIT_CONFIG_GLOBAL=/dev/null; " .. g .. "; } >/dev/null 2>&1")   -- 走らせる人の ~/.gitconfig に左右されない
+  local before = run("git -C " .. sh(base .. "/b") .. " rev-parse HEAD")
+  local o, code = realRun("GIT_ALLOW_PROTOCOL=file " ..
+    M._t.NET.limited("git -C " .. sh(base .. "/b") .. " pull --ff-only -q origin main 2>&1", 30))
+  local after = run("git -C " .. sh(base .. "/b") .. " rev-parse HEAD")
+  check(code == 0 and before ~= after and after == run("git -C " .. sh(base .. "/a") .. " rev-parse HEAD"),
+    "取り込めた: " .. tostring(code) .. " " .. o)
+end)
+
+test("時間の上限: 自動更新の git pull・積み直し・push と sync.sh は、時間を区切って呼ぶ", function()
+  reset({ chats = chats({ "Berry" }), knobs = { pullDiverged = true } })
+  local M = load()
+  check(M._t.pullLatest() == true, "積み直して取り込んだ")
+  at9am(function() M._t.maybeRun() end)
+  local wrapped = { pull = false, rebase = false, push = false, sync = false, branch = false }
+  for _, c in ipairs(W.cmds) do
+    local lim = c:find("/usr/bin/perl -e", 1, true) and c:find("GIT_HTTP_LOW_SPEED_TIME=30", 1, true)
+    if c:find("pull --ff-only", 1, true) then wrapped.pull = lim and true or false end
+    if c:find("pull --rebase", 1, true) then wrapped.rebase = lim and true or false end
+    if c:find("push -q origin main", 1, true) then wrapped.push = lim and true or false end
+    if c:find("sync.sh", 1, true) then wrapped.sync = lim and true or false end
+    if c:find("symbolic-ref", 1, true) then wrapped.branch = lim and true or false end
+  end
+  for k, v in pairs(wrapped) do check(v, k .. " を時間の上限つきで呼ぶ") end
+  check(not W.brokenUserEnv, "hs.execute の第2引数 true で壊れる命令を渡していない: " .. tostring(W.brokenUserEnv))
+end)
+
+test("時間の上限: git pull を打ち切ったら、残った鍵を消して今の版のまま動き、記録に残す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { pullTimeout = true } })
+  local M = loadCopy()
+  run("mkdir -p " .. sh(REPO .. "/.git")); writefile(REPO .. "/.git/index.lock", "")
+  check(M._t.selfUpdate("テスト") == "pullfail" and _G.__LINE_EXPORT == M, "今の版のまま")
+  check(not readfile(REPO .. "/.git/index.lock"), "打ち切った git の鍵を消した")
+  M._t.writeStatus("テスト")
+  check(status():find("== 自動更新の記録（古い順）\n[^=]*git pull に失敗"), "記録に残す:\n" .. status())
+  check(M.lastUpdate.err:find("打ち切った", 1, true), "理由: " .. tostring(M.lastUpdate.err))
+  W.knobs.pullTimeout = nil
+  check(M._t.selfUpdate("テスト") == "same", "通信が戻れば次の確認でまた取り込める")
+end)
+
+test("時間の上限: git pull が時間切れでなく失敗した時は、.git/index.lock を消さない（人の git が使っている）", function()
+  reset({ chats = chats({ "Berry" }), knobs = { pullFails = true } })
+  local M = loadCopy()
+  run("mkdir -p " .. sh(REPO .. "/.git")); writefile(REPO .. "/.git/index.lock", "")
+  check(M._t.selfUpdate("テスト") == "pullfail", "pull に失敗")
+  check(readfile(REPO .. "/.git/index.lock") == "", "鍵は残す")
+end)
+
+test("時間の上限: sync.sh を打ち切ったら「push できず」と分かる形で返し、鍵を消す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { syncTimeout = true } })
+  local M = load()
+  run("mkdir -p " .. sh(REPO .. "/.git")); writefile(REPO .. "/.git/index.lock", "")
+  local r = M._t.runSync()
+  check(r == "push できず（10 分で打ち切った）", "結果: " .. tostring(r))
+  check(not readfile(REPO .. "/.git/index.lock"), "鍵を消した")
+  check(table.concat(W.logs, "\n"):find("sync: push できず（10 分で打ち切った）（理由は", 1, true), "ログ:\n" .. table.concat(W.logs, "\n"))
+end)
+
+test("時間の上限: sync.sh を打ち切った時も、1件の書き出しと手動の実行では「push できなかった」と出す", function()
+  reset({ chats = chats({ "Berry" }), knobs = { syncTimeout = true } })
+  local M = load()
+  W.logs = {}
+  M.one("Berry")
+  local out = table.concat(W.logs, "\n")
+  check(out:find("/ push できず（10 分で打ち切った） ===", 1, true) and out:find("push できなかった", 1, true), "1件:\n" .. out)
+  reset({ chats = chats({ "Berry" }), knobs = { syncTimeout = true } })
+  M = load()
+  M._t.runExport(false)
+  check(W.consoleOpened, "手動の実行ではコンソールを前に出す")
 end)
 
 -- ===================== 開始の時刻（2026-10-25: 07:00 → 00:00）=====================
