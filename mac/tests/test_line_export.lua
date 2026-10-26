@@ -151,6 +151,10 @@ local function visibleTexts(screen)
     if not W.knobs.noRowTimes then add(c.time or "12:34", L.field.x + (W.knobs.timeDX or 250), L.rowY(i) - 9) end
     ::hidden::
   end
+  if not W.open and W.knobs.emptyLogo then
+    add("LINE", W.win.x + W.win.w * 0.65, W.win.y + W.win.h / 2)
+    add("トークを選択", W.win.x + W.win.w * 0.65, W.win.y + W.win.h / 2 + 80)
+  end
   if W.open then
     local c = chat(W.open) or { name = W.open }
     -- ヘッダは開いてから headerDelay 秒たって出る（読み込みが遅い時）
@@ -260,6 +264,9 @@ local function click(pt)
   if W.knobs.bannerAfterDots and math.abs(pt.x - L.dots.x) < 12 and math.abs(pt.y - L.dots.y) < 12 then
     W.banners = { W.knobs.bannerAfterDots }        -- ⋮ を押した直後に通知が届いた
   end
+  if not W.open and math.abs(pt.x - L.dots.x) < 12 and math.abs(pt.y - L.dots.y) < 12 then
+    W.dotsWithoutChat = true                        -- 何も開いていないのに ⋮ の所を押した
+  end
   if W.open and not W.knobs.menuBroken
      and math.abs(pt.x - L.dots.x) < 5 and math.abs(pt.y - L.dots.y) < 5 then
     W.menuOpen = true; return
@@ -274,7 +281,18 @@ local function click(pt)
        and pt.x > L.field.x - 60 and pt.x < L.field.x + L.field.w + 10 then
       W.openLog[#W.openLog + 1] = c.name
       if c.noOpen then return end                  -- 押しても開かない行
+      -- 1回目を押しても開かない行（実機 10/26: 最初の行を押してもトーク欄が空のままだった）
+      if c.firstClickNoOpen and not c.clickedOnce then c.clickedOnce = true; return end
       W.open = c.opens or opened(c); W.openedAt = T  -- opens: 押すと別のトークが開く行
+      -- 開いた後で、別のトークが一覧の下へ動く（実機 10/26: 保存したトークが下へ動き、
+      -- その下の行が1行ずつ上がった）
+      local mv = W.knobs.moveOnOpen
+      if mv and c.name == mv.when then
+        W.knobs.moveOnOpen = nil
+        for k, x in ipairs(W.chats) do
+          if x.name == mv.name then table.remove(W.chats, k); table.insert(W.chats, math.min(mv.to, #W.chats + 1), x); break end
+        end
+      end
       W.focus = "input"
       -- 新着で別のトークが一覧の一番上に来る（reorderAtClick 回目に押した後）
       if W.knobs.reorderAtClick == W.clickN then
@@ -2005,6 +2023,72 @@ test("一覧が途中で並び替わっても（新着）、同じトークを2�
     " / 開いた順: " .. table.concat(W.openLog, ","))
   check(line(heartbeat(), "ok: 20") and line(heartbeat(), "ng: 0"), "数:\n" .. heartbeat())
   safe()
+end)
+
+-- ===================== 実機の初回（10/26 17:54）で見えたこと =====================
+test("実機 10/26: 保存したトークが下へ動いて済んだ行が1行ずつ上がっても、開いたままのトークの行をもう一度押さない", function()
+  local list = numbered(25)
+  list[3].ocrHeader = "トーク3番 ゆう"              -- ヘッダは一覧の名前より長い（実機）
+  list[10].ocrHeader = "トーク10番 さん"
+  reset({ chats = list, knobs = { moveOnOpen = { when = "トーク3番", name = "トーク2番", to = 7 } } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ng: 0") and line(hb, "ok: 20"), "失敗にしない:\n" .. hb)
+  local count = {}
+  for _, nm in ipairs(W.openLog) do count[nm] = (count[nm] or 0) + 1 end
+  check(count["トーク3番"] == 1 and count["トーク2番"] == 1, "済んだ行は押し直さない: " .. table.concat(W.openLog, ","))
+  check(#outFiles() == 20 and has("トーク20番"), "20 件: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("実機 10/26: 最初の行を押してもトーク欄が空のままなら、もう1回押して開く", function()
+  local list = numbered(5)
+  list[1].firstClickNoOpen = true
+  reset({ chats = list, knobs = { emptyLogo = true } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ok: 5") and line(hb, "ng: 0") and has("トーク1番"), "押し直して保存した:\n" .. hb)
+  check(not W.dotsWithoutChat, "何も開いていないのに ⋮ を押していない")
+  safe()
+end)
+
+test("実機 10/26: 押してもトーク欄が空のままのトーク（別の窓で開く等）は、⋮ を押さずに失敗にする", function()
+  local list = numbered(4)
+  list[1].noOpen = true
+  reset({ chats = list, knobs = { emptyLogo = true } })
+  local M = load()
+  M._t.runExport(true)
+  local hb = heartbeat()
+  check(line(hb, "ng: 1") and hb:find("一覧の1番目: [トーク確認] 押した行のトークが開かない（トーク欄が空のまま）", 1, true),
+    "空のままと書く:\n" .. hb)
+  check(not W.dotsWithoutChat, "何も開いていないのに ⋮ を押していない")
+  check(line(hb, "ok: 3") and #outFiles() == 3, "ほかは保存: " .. table.concat(outFiles(), ","))
+  safe()
+end)
+
+test("実機 10/26: 下へ送った後の古いトークの日付（10.18・10 / 18・2025-10-18 の形）も時刻として読む", function()
+  for _, fmt in ipairs({ "10.18", "10 / 18", "2025-10-18" }) do
+    local list = numbered(30)
+    for i = 6, 30 do list[i].time = fmt end
+    reset({ chats = list })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    check(line(hb, "ok: 20") and line(hb, "ng: 0") and has("トーク20番"), fmt .. ": 20 件:\n" .. hb)
+  end
+end)
+
+test("実機 10/26: 一覧が読めない時は、右の列に見えたものの形（数字は 9）を診断に残す（名前は出さない）", function()
+  local list = numbered(30)
+  for i = 6, 30 do list[i].time = "10_18" end      -- 時刻と見なせない形
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  local rep = readfile(DEBUG .. "/latest.txt") or ""
+  check(rep:find("一覧の右の列: ", 1, true) and rep:find("99_99", 1, true), "形を残す:\n" .. rep)
+  check(not rep:find("トーク7番", 1, true), "名前は出さない")
 end)
 
 test("名前が同じに見えるトーク（かにっこにー と かにっこにー (2)）も、それぞれの保存名で保存する", function()
