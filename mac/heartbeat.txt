@@ -1,8 +1,7 @@
-last_run: 2026-10-27 00:51:48
+last_run: 2026-10-27 02:45:15
 version: v4.1-06067bc1
-ok: 11
+ok: 19
 ng: 1
-note: 中断: 人の操作を検知（一覧の 13 番目で中断）
 failures:
-  - 一覧の8番目: [トーク確認] 押した行のトークが開かない（ヘッダが押す前のまま）（画像: Dropbox の Backups/line-dump-debug/20261027-005032_一覧の8番目_トーク確認.jpg）
+  - 一覧の9番目: [トーク確認] 押した行のトークが開かない（前のトークと同じ保存名）（画像: Dropbox の Backups/line-dump-debug/20261027-024145_一覧の9番目_トーク確認.jpg）
 debug: Dropbox の Backups/line-dump-debug（撮影画像と診断。非公開）
