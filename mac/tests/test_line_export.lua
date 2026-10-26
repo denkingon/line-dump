@@ -14,6 +14,12 @@ local SCRIPT = here .. "/line_export.lua"
 local function sh(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
 local function run(cmd) local p = io.popen(cmd); local o = p:read("a"); p:close(); return o end
 local ROOT = run("mktemp -d"):gsub("%s+$", "")
+-- ROOT の下を rm -rf するので、作れなかった時は何もせずに止める（mktemp が見つからず
+-- ROOT が空になると、/home や /tmp を消してしまう。10/26 に試験の環境で実際に起きた）
+if not (ROOT:match("^/.+/[^/]+$") and run("test -d " .. sh(ROOT) .. " && echo ok") == "ok\n") then
+  io.stderr:write("一時フォルダを作れない（mktemp -d の結果: " .. ROOT .. "）。何も消さずに止める\n")
+  os.exit(2)
+end
 local ENV = {
   HOME = ROOT .. "/home", LINE_DUMP_REPO = ROOT .. "/repo",
   LINE_DUMP_RAW_DIR = ROOT .. "/out", TMPDIR = ROOT .. "/tmp",
@@ -40,6 +46,7 @@ local LINE_PID, OTHER_PID, HS_PID = 4242, 999, 777
 local T = 1000000                     -- 偽の時計（usleep で進む）
 
 local function reset(opts)
+  assert(ROOT:match("^/.+/[^/]+$"), "一時フォルダが変: " .. ROOT)
   run("rm -rf " .. sh(ROOT .. "/home") .. " " .. sh(ROOT .. "/repo") .. " " ..
       sh(ROOT .. "/out") .. " " .. sh(ROOT .. "/tmp") .. " " .. sh(DEBUG))
   for _, d in ipairs({ HOME .. "/Downloads", HOME .. "/Desktop", HOME .. "/Documents",
@@ -3551,10 +3558,13 @@ test("時間の上限: 本物のシェルで、時間切れなら孫のプロセ
   local o, code, dt = realRun("unset GIT_TERMINAL_PROMPT GIT_HTTP_LOW_SPEED_TIME; " ..
     NET.limited("echo hi; echo \"$GIT_TERMINAL_PROMPT/$GIT_HTTP_LOW_SPEED_TIME\"; exit 3", 5))
   check(o == "hi\n0/30\n" and code == 3, "普通に終われば出力と終わり方はそのまま（git の設定も渡す）: " .. o .. " " .. tostring(code))
-  o, code, dt = realRun(NET.limited("(sleep 31.7 &); sleep 31.7", 2))
+  local pidf = ROOT .. "/grandchild.pid"
+  os.remove(pidf)
+  o, code, dt = realRun(NET.limited("(sleep 30 & echo $! > " .. sh(pidf) .. "); echo $$ >> " .. sh(pidf) .. "; sleep 30", 2))
   check(NET.timedOut(o) and code == 124 and dt <= 4, "時間切れで戻る（出力を握った孫がいても）: " .. o .. " " .. tostring(code) .. " " .. dt .. "s")
-  local left = realRun("for i in 1 2 3 4 5 6; do pgrep -f 'slee[p] 31.7' >/dev/null || { echo none; exit; }; sleep 0.5; done; pgrep -fa 'slee[p] 31.7'")
-  check(left == "none\n", "孫のプロセスも残さない: " .. left)
+  local left = realRun("for i in 1 2 3 4 5 6; do alive=; for p in $(cat " .. sh(pidf) .. "); do kill -0 $p 2>/dev/null && alive=\"$alive $p\"; done; " ..
+    "[ -z \"$alive\" ] && { echo none; exit; }; sleep 0.5; done; echo \"left:$alive\"")
+  check((readfile(pidf) or ""):match("%d+%s+%d+") and left == "none\n", "孫のプロセスも残さない: " .. left .. " / " .. tostring(readfile(pidf)))
   o = realRun(NET.limited("echo \"$GIT_SSH_COMMAND\"", 5))
   check(o:find("BatchMode=yes", 1, true) and o:find("ConnectTimeout=20", 1, true), "ssh も止まったら諦める: " .. o)
   o, code = realRun(NET.limited("printf '%s\\n' \"it's ok\"", 5))
@@ -3678,6 +3688,6 @@ test("開始の時刻: 既定（00:00）でも、使用中・ロック中は始�
   end)
 end)
 
-run("rm -rf " .. sh(ROOT))
+if ROOT:match("^/.+/[^/]+$") then run("rm -rf " .. sh(ROOT)) end
 realprint(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)
