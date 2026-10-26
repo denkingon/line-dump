@@ -165,7 +165,13 @@ local function visibleTexts(screen)
     local c = chat(W.open) or { name = W.open }
     -- ヘッダは開いてから headerDelay 秒たって出る（読み込みが遅い時）
     if not W.knobs.headerDelay or T - (W.openedAt or 0) >= W.knobs.headerDelay then
-      add(c.ocrHeader or c.name, L.header.x, L.header.y)
+      -- ocrHeaderFlip = { a, b }: ヘッダの OCR の字が読むたびに a・b と変わる（実機 10/27 02:41）
+      local hd = c.ocrHeader or c.name
+      if c.ocrHeaderFlip then
+        c.flipN = (c.flipN or 0) + 1
+        hd = c.ocrHeaderFlip[(c.flipN % 2) + 1]
+      end
+      add(hd, L.header.x, L.header.y)
     end
     -- ヘッダの右端の ⋮（OCR では1字として読める。noDotsOCR で読めない）と、その左の通話ボタン
     if not W.knobs.noDotsOCR then add("⋮", L.dots.x, L.dots.y) end
@@ -3587,6 +3593,22 @@ test("見直し 10/26 夜（11）: 押した所に新着で別のトークが来
   check(not has("トーク25番") and line(hb, "ng: 1"), "25番の失敗は残す:\n" .. hb .. namesTxt())
   check(has("トーク1番") and has("トーク19番"), "ほかの上位は保存: " .. table.concat(outFiles(), ","))
   safe()
+end)
+
+test("実機 10/27 02:41: 開いたトークの行をまた押した時、ヘッダの OCR が読むたびに変わって「変わった」に見えても、失敗にしない", function()
+  for _, v in ipairs({ { at = 12 }, { at = 3, drift = true }, { at = 12, drift = true } }) do   -- 12: 見えている一番下の行
+    local list = numbered(25)
+    local c = list[v.at]
+    c.ocrRow = c.name .. " 0241"                        -- 行の名前に5字（時刻など）が付いて読める
+    c.ocrRowOpen = v.drift and (c.name .. " 0242") or nil
+    c.ocrHeaderFlip = { c.name .. "の家族グループ", c.name .. "の家族グルーブ" }   -- ヘッダは行と違い、読むたびに1字揺れる
+    reset({ chats = list })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    check(line(hb, "ng: 0") and line(hb, "ok: 20") and has("トーク20番"), v.at .. ": 失敗にせず 20 件目まで:\n" .. hb .. "\n開いた順 " .. table.concat(W.openLog, ","))
+    safe()
+  end
 end)
 
 test("実機 10/26: 最初の行を押してもトーク欄が空のままなら、もう1回押して開く", function()
