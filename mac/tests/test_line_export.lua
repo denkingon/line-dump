@@ -2026,7 +2026,7 @@ test("一覧が途中で並び替わっても（新着）、同じトークを2�
 end)
 
 -- ===================== 実機の初回（10/26 17:54）で見えたこと =====================
-test("実機 10/26: 保存したトークが下へ動いて済んだ行が1行ずつ上がっても、開いたままのトークの行をもう一度押さない", function()
+test("実機 10/26: 保存したトークが下へ動いて済んだ行が1行ずつ上がり、開いたままのトークの行をまた押しても、失敗にせず数えない", function()
   local list = numbered(25)
   list[3].ocrHeader = "トーク3番 ゆう"              -- ヘッダは一覧の名前より長い（実機）
   list[10].ocrHeader = "トーク10番 さん"
@@ -2035,10 +2035,9 @@ test("実機 10/26: 保存したトークが下へ動いて済んだ行が1行�
   M._t.runExport(true)
   local hb = heartbeat()
   check(line(hb, "ng: 0") and line(hb, "ok: 20"), "失敗にしない:\n" .. hb)
-  local count = {}
-  for _, nm in ipairs(W.openLog) do count[nm] = (count[nm] or 0) + 1 end
-  check(count["トーク3番"] == 1 and count["トーク2番"] == 1, "済んだ行は押し直さない: " .. table.concat(W.openLog, ","))
-  check(#outFiles() == 20 and has("トーク20番"), "20 件: " .. table.concat(outFiles(), ","))
+  check(#outFiles() == 20 and has("トーク20番") and has("トーク3番"), "20 件: " .. table.concat(outFiles(), ","))
+  local rep = readfile(DEBUG .. "/latest.txt") or ""
+  check(namesTxt():find("保存した", 1, true) and not namesTxt():find("失敗", 1, true), "names.txt に失敗は無い:\n" .. namesTxt())
   safe()
 end)
 
@@ -2068,8 +2067,8 @@ test("実機 10/26: 押してもトーク欄が空のままのトーク（別の
   safe()
 end)
 
-test("実機 10/26: 下へ送った後の古いトークの日付（10.18・10 / 18・2025-10-18 の形）も時刻として読む", function()
-  for _, fmt in ipairs({ "10.18", "10 / 18", "2025-10-18" }) do
+test("実機 10/26: 下へ送った後の古いトークの日付（10.18・10 / 18・2025-10-18・10,18・10 18・全角の 10／18）も時刻として読む", function()
+  for _, fmt in ipairs({ "10.18", "10 / 18", "2025-10-18", "10,18", "10 18", "10／18" }) do
     local list = numbered(30)
     for i = 6, 30 do list[i].time = fmt end
     reset({ chats = list })
@@ -2082,13 +2081,70 @@ end)
 
 test("実機 10/26: 一覧が読めない時は、右の列に見えたものの形（数字は 9）を診断に残す（名前は出さない）", function()
   local list = numbered(30)
-  for i = 6, 30 do list[i].time = "10_18" end      -- 時刻と見なせない形
+  for i = 6, 30 do list[i].time = "1018" end        -- 時刻と見なせない形（区切りが読めない）
   reset({ chats = list })
   local M = load()
   M._t.runExport(true)
   local rep = readfile(DEBUG .. "/latest.txt") or ""
-  check(rep:find("一覧の右の列: ", 1, true) and rep:find("99_99", 1, true), "形を残す:\n" .. rep)
+  check(rep:find("一覧の右の列: ", 1, true) and rep:find("9999", 1, true), "形を残す:\n" .. rep)
   check(not rep:find("トーク7番", 1, true), "名前は出さない")
+  -- 数字と日付の区切り以外の記号（顔文字など）は、形でなく伏せ字にする
+  list = numbered(30)
+  for i = 1, 30 do list[i].time = "(^_^)" end
+  reset({ chats = list })
+  M = load()
+  M._t.runExport(true)
+  rep = readfile(DEBUG .. "/latest.txt") or ""
+  check(rep:find("一覧の右の列: ［数字］", 1, true) and not rep:find("(^_^)", 1, true), "記号は伏せ字:\n" .. rep)
+end)
+
+test("見直し 10/26: 同じに読める名前のトーク（パプリカ🍅 と 🌶️）が離れていても、両方保存する（名前だけで飛ばさない）", function()
+  local list = numbered(30)
+  table.insert(list, 2, { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true })
+  table.insert(list, 14, { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true })
+  reset({ chats = list })
+  local M = load()
+  M._t.runExport(true)
+  check(has("パプリカ🍅") and has("パプリカ🌶️"), "両方保存: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ng: 0"), "失敗なし:\n" .. heartbeat())
+  safe()
+end)
+
+test("見直し 10/26: 同じに読める名前の片方が保存の後で下へ動いても、もう片方を取りこぼさない", function()
+  local list = numbered(30)
+  table.insert(list, 1, { name = "パプリカ🍅", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true })
+  table.insert(list, 4, { name = "パプリカ🌶️", ocrRow = "パプリカ》", ocrHeader = "パプリカ》", noAX = true })
+  reset({ chats = list, knobs = { moveOnOpen = { when = "パプリカ🍅", name = "パプリカ🍅", to = 13 } } })
+  local M = load()
+  M._t.runExport(true)
+  check(has("パプリカ🍅") and has("パプリカ🌶️"), "両方保存: " .. table.concat(outFiles(), ","))
+  check(line(heartbeat(), "ng: 0"), "失敗なし:\n" .. heartbeat())
+  safe()
+end)
+
+test("見直し 10/26: 押しても開かなかった行は、並び替わって位置が変わっても、もう一度試す", function()
+  local list = numbered(25)
+  list[3].firstClickNoOpen = true                   -- 1回目は開かない（ヘッダは前のトークのまま）
+  reset({ chats = list, knobs = { moveOnOpen = { when = "トーク4番", name = "トーク1番", to = 9 } } })
+  local M = load()
+  M._t.runExport(true)
+  check(has("トーク3番"), "後でもう一度押して保存: " .. table.concat(outFiles(), ",") .. " / " .. table.concat(W.openLog, ","))
+  safe()
+end)
+
+test("見直し 10/26: 一覧とトーク欄の境目が測れない時（検索欄の右端で代える）も、空のトーク欄を見分ける", function()
+  for _, case in ipairs({ { first = true, want = "ok: 5" }, { noOpen = true, want = "トーク欄が空のまま" } }) do
+    local list = numbered(5)
+    for _, c in ipairs(list) do c.noAX = true end
+    if case.first then list[1].firstClickNoOpen = true else list[1].noOpen = true end
+    reset({ chats = list, knobs = { emptyLogo = true, timeDX = 285 } })
+    local M = load()
+    M._t.runExport(true)
+    local hb = heartbeat()
+    check(hb:find(case.want, 1, true), case.want .. ":\n" .. hb)
+    check(not W.dotsWithoutChat, "何も開いていないのに ⋮ を押していない")
+    safe()
+  end
 end)
 
 test("名前が同じに見えるトーク（かにっこにー と かにっこにー (2)）も、それぞれの保存名で保存する", function()
