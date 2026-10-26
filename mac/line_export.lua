@@ -1560,8 +1560,11 @@ local function saveAndMove(ctx, app, st)
     -- 行）も同じ（この実行で済んだトークなら dup-run）
     -- 字の読めない行が、最後に開いた行のすぐ上なら（一覧が動いて今開いているトークの位置が分から
     -- なくなっても）、選ばれて字が読めなくなった今開いているトークの行と見なしてよい
-    if same and ctx.list.recheck and (ctx.list.rowSame or (ctx.list.atOpenPos and ctx.list.rowLike) or ctx.list.retryMisopen
-                                      or (ctx.list.nearOpen and (rt == "" or ctx.list.rowLike))) then
+    -- ヘッダが変わったように見えても（ヘッダの OCR が読むたびに揺れる。実機 10/27 02:41）、前の
+    -- トークと同じ保存名なら開いているトークは変わっていない。同じように行の名前・位置で決める
+    if same and (ctx.list.recheck or not ctx.list.rowMatched)
+       and (ctx.list.rowSame or (ctx.list.atOpenPos and ctx.list.rowLike) or ctx.list.retryMisopen
+            or (ctx.list.nearOpen and (rt == "" or ctx.list.rowLike))) then
       same = false
       note(ctx, "保存ダイアログ", "押した行は今開いているトークの行だった")
     end
