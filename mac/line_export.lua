@@ -1547,10 +1547,15 @@ local function saveAndMove(ctx, app, st)
       return a:sub(1, utf8.offset(a, 4) - 1) == b:sub(1, utf8.offset(b, 4) - 1)
     end
     ctx.list.rowLike = rt == "" or agrees(rt) or head3(countless(norm(body)), countless(rt))
+    -- ヘッダが変わって開いたと見なした行（行の名前とヘッダは合わなかった）なのに、保存名が行の
+    -- 名前と似てもいない: 押した所に別のトークが来ていた
+    ctx.list.wrongRow = not ctx.list.rowMatched and not ctx.list.recheck and rt ~= "" and not agrees(rt)
     -- 押してもヘッダが変わらなかった行が、今開いているトークの行なら、前のトークと同じ保存名でも
     -- 「開かない」ではない。この実行で済んだか（dup-run）・今日保存済みか（dup）で決め、まだなら
     -- 保存する（始める前から開いていたトークは、まだ保存していない）
-    if same and ctx.list.recheck and (ctx.list.rowSame or (ctx.list.atOpenPos and ctx.list.rowLike)) then
+    -- 押したら別のトークが開いた行を押し直して、またそのトークのまま（押すといつもそのトークが開く
+    -- 行）も同じ（この実行で済んだトークなら dup-run）
+    if same and ctx.list.recheck and (ctx.list.rowSame or (ctx.list.atOpenPos and ctx.list.rowLike) or ctx.list.retryMisopen) then
       same = false
       note(ctx, "保存ダイアログ", "押した行は今開いているトークの行だった")
     end
@@ -1890,7 +1895,14 @@ local function exportRow(app, ctx, win, row, prevHeader)
       -- 押してしまう）。見つからなければ押し直さない
       -- （名前が画面に1回だけなら、1行ずれた所まで探す。同じに読める行がある時は同じ位置だけ）
       local again
-      if not ctx.list.firstRow and not reclicked then
+      -- 最初の行は、行の名前がヘッダの名前を含む・含まれるなら押す前から開いていたトークの行
+      -- なので押し直さない（保存名で確かめる）
+      local preOpen = false
+      if ctx.list.firstRow and hl[1] and row.n ~= "" then
+        local rc, hc = rowKey(row), rowKey({ n = hl[1].n, text = "" })
+        preOpen = hc ~= "" and (hc:find(rc, 1, true) ~= nil or rc:find(hc, 1, true) ~= nil)
+      end
+      if not reclicked and not preOpen then
         reclicked = true
         local key, best, same = rowKey(row), nil, 0
         local g = ctx.list.gap or 70
@@ -1916,6 +1928,7 @@ local function exportRow(app, ctx, win, row, prevHeader)
         -- 行の名前と合うかで確かめる（合わなければ、押す前から開いていた別のトークなので保存しない）
         recheck = not ctx.list.firstRow
         ctx.list.recheck = recheck
+        ctx.list.timedOut = true
         if hl[1] then ctx.list.verifyRow = row.n end
         hdr = hl[1] or { x = ctx.paneX + 120, y = cy, n = "", text = "" }   -- ヘッダの名前が読めない
         break
@@ -1933,10 +1946,19 @@ local function exportRow(app, ctx, win, row, prevHeader)
   if not ok then
     -- ヘッダが押す前のままで、今開いているトークに「トークを保存」が無い: 保存名で確かめられ
     -- ない。行の名前がヘッダと合わなければ、押した行は開かなかった（黙って飛ばさない）
-    if recheck and hl[1] and e.stage == "メニュー" and tostring(e.msg):find("見当たらない", 1, true) then
+    if ctx.list.timedOut and hl[1] and e.stage == "メニュー" and tostring(e.msg):find("見当たらない", 1, true) then
       local rc, hc = rowKey(row), rowKey({ n = hdr.n, text = hdr.text })
-      local like = rc ~= "" and hc ~= "" and (hc:find(rc, 1, true) or rc:find(hc, 1, true))
-      if row.n == "" or not (rc == hc or (ctx.list.atOpenPos and like)) then
+      local function head3(a, b)                  -- 頭の3字が同じ（選ばれてアイコンを字に読んだ等）
+        if (utf8.len(a) or 0) < 3 or (utf8.len(b) or 0) < 3 then return false end
+        return a:sub(1, utf8.offset(a, 4) - 1) == b:sub(1, utf8.offset(b, 4) - 1)
+      end
+      local contains = rc ~= "" and hc ~= "" and (hc:find(rc, 1, true) ~= nil or rc:find(hc, 1, true) ~= nil)
+      -- 今開いているトークの位置なら選ばれて字が変わっていてもよい（頭の3字）。最初の行（押す前から
+      -- 開いていたトークの行かもしれない）は含むまで。名前の読めない行は今開いているトークの位置だけ
+      local okSkip
+      if row.n == "" then okSkip = ctx.list.atOpenPos
+      else okSkip = rc == hc or (ctx.list.atOpenPos and (contains or head3(rc, hc))) or (ctx.list.firstRow and contains) end
+      if not okSkip then
         return fail(ctx, "トーク確認", "押した行のトークが開かない（ヘッダが押す前のまま）", nil, headerSeen(hl))
       end
     end
@@ -2028,44 +2050,91 @@ local function exportList(app, R)
   local tried, thisRun, n, lastKey, anyOpened, idx = {}, {}, 0, nil, false, 0
   local skipsInRow = 0                              -- 「トークを保存」が無いトークが続いた数
   local skipped = {}                                -- この実行で飛ばしたトークのヘッダの名前
+  local failed = {}                                 -- この実行で失敗した行の名前 → { list = names.txt の行, ng = heartbeat の行 }
+  local misopened = {}                              -- 押したら別のトークが開いた行
+  -- さっき失敗した行を開き直して、そのトークだと確かめられた（保存した・今日保存済み・飛ばした等）:
+  -- 失敗を取り消し、20 件に2回数えない
+  local function retract(row, ctx, how)
+    local f = row.n ~= "" and failed[rowKey(row)]
+    if not f then return end
+    failed[rowKey(row)] = nil
+    n = n - 1; R.ngN = R.ngN - 1
+    for i, l in ipairs(R.ngLines) do if l == f.ng then table.remove(R.ngLines, i); break end end
+    f.list.how = "失敗の後で開き直した: " .. how .. "（" .. idx .. " 番目）"
+    note(ctx, "一覧", "さっき失敗した行を開き直せたので、失敗を取り消す")
+  end
   local lastPos                                     -- 前に開いた行の位置
   -- 開いた後に読み直した一覧（after）を、押す前の一覧（before）と比べる。名前がどちらにも
   -- 1回ずつだけ見える行（開いた行・前に開いた行は除く）がどれだけ動いたかで:
   -- ・どの行も動いていない: 開いた行（選ばれて色が付く）と前に開いた行（色が外れる）は
   --   OCR の字が変わることがある（実機 10/26 21:22: 同じ行をすぐまた開いた）。その位置の
-  --   新しい字も済んだことにする。名前では決めず、開いた行より下に動いていない行があり
-  --   行の数も同じ時だけ（開いたトークが下へ動いて別の行が上がってきた時は、そうならない）
-  -- ・一番上の行が k 行下へ動いた: 新着で上に k 件来た。済んだ行の位置に k を足す（開き
-  --   直さない）。下へ送っていたら、来たトークは見えている所より上にあるので、一番上へ
-  --   戻すよう k を返す（戻さないと開かずに 21 番目を保存していた）
+  --   新しい字も済んだことにする。名前では決めず、すぐ下の行が動いておらず、新しい字が押す
+  --   前の一覧のどこにも無い時だけ（別の行が上がってきた時は、そうならない）
+  -- ・上から見て最初に動いた行が k 行下へ動いた（それより上のピン留めしたトークは動かない）:
+  --   新着で k 件来た。済んだ行の位置に k を足す（開き直さない）。下へ送っていたら、来た
+  --   トークは見えている所より上にあるので、一番上へ戻す（戻さないと開かずに 21 番目を保存していた）
+  -- ・それ以外（開いたトーク・前に開いたトークが下へ動いた等）: 前に開いた行の位置は当てにならない
+  -- 戻り値: { k = 新着の数, upTo = 新着が入った辺りの一番下の位置, stale = 前に開いた行の位置を捨てる,
+  --           openPos = 開いたトークの今の位置, left = 開いたトークが見えている所より上へ動いた }
   local function follow(before, after, opened, ctx)
-    local cb, ca, ya, inBefore = {}, {}, {}, {}
+    local cb, ca, ya, inBefore, inAfter = {}, {}, {}, {}, {}
     for _, r in ipairs(before) do
       inBefore[rowKey(r)] = true
       if r.n ~= "" then local k = rowKey(r); cb[k] = (cb[k] or 0) + 1 end
     end
     for _, r in ipairs(after) do
       r.key = keyOf(r)
+      inAfter[rowKey(r)] = true
       if r.n ~= "" then local k = rowKey(r); ca[k] = (ca[k] or 0) + 1; ya[k] = r.y end
     end
-    local p = posOf(opened.key)
-    local top, moved, dAt, dBelow = nil, false, {}, nil   -- dAt[位置]: 比べられた行の動いた行数
+    local p, ok0 = posOf(opened.key), rowKey(opened)
+    -- 開いた位置より上で、開いたトークの行らしいもの: 開いたトークの字がそのまま1回だけあればその行。
+    -- 無ければ（選ばれて字が変わった）、押す前に無かった字の行が1つだけならその行
+    local function openedAbove()
+      local found, n2 = nil, 0
+      if inAfter[ok0] then
+        for _, a in ipairs(after) do if rowKey(a) == ok0 then n2 = n2 + 1; found = a end end
+        return (n2 == 1 and posOf(found.key) < p) and found or nil
+      end
+      for _, a in ipairs(after) do
+        if posOf(a.key) < p and not inBefore[rowKey(a)] then n2 = n2 + 1; found = a end
+      end
+      return n2 == 1 and found or nil
+    end
+    -- その行が開いたトークの行と言えるか: 同じ字・どちらかがもう一方を含む（選ばれてアイコンを
+    -- 字に読んだ等）なら true。字が読めなければ "unread"（位置だけ使い、済んだことにはしない）。
+    -- 似ていなければ false（新着で上に来た別のトークかもしれない）
+    local function looksOpened(a)
+      if a.n == "" then return "unread" end
+      local ka = rowKey(a)
+      return ka == ok0 or ka:find(ok0, 1, true) ~= nil or ok0:find(ka, 1, true) ~= nil
+    end
+    local moves, moved, dAt, dBelow, dAbove, dSelf = {}, false, {}, nil, nil, nil   -- dAt[位置]: 比べられた行の動いた行数
     for _, b in ipairs(before) do
       local q, k = posOf(keyOf(b)), rowKey(b)
-      if q ~= p and q ~= lastPos and b.n ~= "" and cb[k] == 1 and ca[k] == 1 then
-        local d = math.floor((ya[k] - b.y) / gap + 0.5)
+      local comparable = b.n ~= "" and cb[k] == 1 and ca[k] == 1
+      local d = comparable and math.floor((ya[k] - b.y) / gap + 0.5) or nil
+      if q == p then dSelf = d                    -- 開いた行そのもの（字が変わっていなければ）
+      elseif d and b.y < opened.y then dAbove = d   -- 開いた行のすぐ上（前に開いた行も含む）
+      end
+      if q ~= p and q ~= lastPos and comparable then
         dAt[q] = d
-        if top == nil then top = d end
-        if dBelow == nil and b.y > opened.y then dBelow = d end   -- 開いた行のすぐ下の動き（開いた行も同じだけ動いた）
+        moves[#moves + 1] = { q = q, d = d }
+        if dBelow == nil and b.y > opened.y then dBelow = d end   -- 開いた行のすぐ下の動き
         if d ~= 0 then moved = true end
       end
     end
-    if top == nil then return nil, true end      -- 比べられる行が無い: 動いたか分からない
+    -- 開いた行が動いた行数: 字が変わっていなければその行の動き。変わっていれば、すぐ上とすぐ下の
+    -- 行の動きが同じ時だけ（違えば、その間に新着が入ったのか分からない）
+    local dOpen = dSelf
+    if dOpen == nil then
+      if dAbove == nil or dBelow == nil then dOpen = dAbove or dBelow
+      elseif dAbove == dBelow then dOpen = dBelow end
+    end
+    if #moves == 0 then return { stale = true } end   -- 比べられる行が無い: 動いたか分からない
     if not moved then
       -- 下から別の行が上がってきていないと確かめられる位置だけ（すぐ下の行が比べられて
-      -- 動いていない。名前の読めない行・同じに読める行が下にある時は確かめられない）。
-      -- 新しい字が押す前の一覧のどこにも無い時だけ（別の行が動いてきたのではなく、
-      -- 同じ行の字が変わった）
+      -- 動いていない。名前の読めない行・同じに読める行が下にある時は確かめられない）
       local okP = dAt[p + 1] == 0
       local okL = lastPos ~= nil and (lastPos + 1 == p or dAt[lastPos + 1] == 0)
       if #after == #before then
@@ -2077,30 +2146,78 @@ local function exportList(app, R)
           end
         end
       end
-      return nil, false
+      return {}
     end
-    if top < 1 then return nil, true end           -- 動いたが、上に来た分ではない（前に開いた行の位置は当てにならない）
+    local k, ins
+    for _, m in ipairs(moves) do
+      if m.d ~= 0 then
+        if m.d >= 1 then k, ins = m.d, m.q end
+        break
+      end
+    end
+    if not k then
+      -- 新着で上に来た分ではない（開いたトーク・前に開いたトークが下へ動いた等）。開いたトークが
+      -- 上へ上がって選ばれた字になっていれば、その行は済んだことにする
+      local a = not inAfter[ok0] and openedAbove()
+      local lk = a and looksOpened(a)
+      if lk == true then
+        tried[a.key] = true
+        note(ctx, "一覧", "一覧が動き、開いたトークの行の字も変わった（その行は開き直さない）")
+        return { openPos = posOf(a.key) }
+      elseif lk == "unread" then
+        return { openPos = posOf(a.key) }
+      end
+      return { stale = true }
+    end
     local first, at, add = posOf(keyOf(before[1])), {}, {}
     for _, a in ipairs(after) do at[a.key] = true end
+    -- 開いたトーク自身に新着が来て一番上の方へ動いたか: 下の行は動かず、開いた位置に1つ上の行が
+    -- 下がってきた。一番上が見えていれば、そこの開いたトークの行を済んだことにする（選ばれて字が
+    -- 変わっていてもよい）。見えていなければ、一番上へ戻した後で探す
+    local left, openPos = false, nil
+    if dBelow == 0 then
+      for _, b in ipairs(before) do
+        local kb = rowKey(b)
+        if posOf(keyOf(b)) == p - 1 and b.n ~= "" and cb[kb] == 1 and ca[kb] == 1 and at[kb .. "@" .. p] then left = true end
+      end
+      if left and sc.offset == 0 then
+        local a = openedAbove()
+        local lk = a and looksOpened(a)
+        if lk then openPos = posOf(a.key) end
+        if lk == true then tried[a.key] = true end
+      end
+    end
+    -- 開いた行が見えている一番下の行だった等で上の確かめができない時も、一番上が見えていて、開いた
+    -- 位置より上に開いたトークの字（含む）の行が1つだけあれば、それが一番上へ動いた開いたトーク
+    if not openPos and sc.offset == 0 then
+      local a = openedAbove()
+      if a and posOf(a.key) < p and looksOpened(a) == true then
+        openPos = posOf(a.key); tried[a.key] = true; left = false
+      end
+    end
     for key in pairs(tried) do
       local nm, q = key:match("^(.*)@(%-?%d+)$")
       q = tonumber(q)
       -- 見えている行は、その名前が1回ずつだけ見えて k 行下にある時だけ（名前の読めない行・
       -- 同じに読める行は、別の行を済んだことにしないよう開き直して保存名で確かめる）
-      if nm and q and (q < first or (at[nm .. "@" .. (q + top)] and cb[nm] == 1 and ca[nm] == 1)) then
-        add[#add + 1] = nm .. "@" .. (q + top)
+      if nm and q and (q < first or (at[nm .. "@" .. (q + k)] and cb[nm] == 1 and ca[nm] == 1)) then
+        add[#add + 1] = nm .. "@" .. (q + k)
       end
     end
-    for _, k in ipairs(add) do tried[k] = true end
-    note(ctx, "一覧", "新着で一覧が " .. top .. " 行下へ動いた（済んだ行は開き直さない" ..
+    for _, key in ipairs(add) do tried[key] = true end
+    note(ctx, "一覧", "新着で一覧が " .. k .. " 行下へ動いた（済んだ行は開き直さない" ..
       (sc.offset > 0 and "。上に来たトークを開くため一番上へ戻す）" or "）"))
-    log("一覧: 新着で " .. top .. " 行下へ動いた")
-    return top, false, dBelow
+    log("一覧: 新着で " .. k .. " 行下へ動いた")
+    return { k = k, upTo = ins + k - 1, dOpen = dOpen, unknown = dOpen == nil, left = left and not openPos, openPos = openPos }
   end
   -- 20 件済んだ後の見直し（sweep）: 下へ送っていたら、送っている間に新着で見えている所より
-  -- 上へ来たトークは開いていない（送った量に紛れて気づけない）。一番上の画面を1回だけ見て、
-  -- この実行で一度も見なかった名前の行だけ開く（数は 20 を超えてよい）
-  local seen, sweep = {}, false
+  -- 上へ来たトークは開いていない（送った量に紛れて気づけない）。一番上の画面を見て、この
+  -- 実行で一度も見なかった名前の行だけ開く（数は 20 を超えてよい。多くても 5 件）
+  local seen, sweep, sweepN, sweepUpTo = {}, false, 0, nil
+  local function sweepPick(r)                       -- 見直しで開く行: 一度も見なかった名前・名前の読めない行・20 件目で来た新着
+    if r.n == "" or not seen[rowKey(r)] then return true end
+    return sweepUpTo ~= nil and posOf(r.key) <= sweepUpTo
+  end
   while rows and (n < LIST_TOP or sweep) do
     if not sweep then for _, r in ipairs(rows) do seen[rowKey(r)] = true end end
     -- 前の行で保存ダイアログが残っていたら（押す所が塞がれて止まった時など）閉じる。
@@ -2115,7 +2232,7 @@ local function exportList(app, R)
     local row
     for _, r in ipairs(rows) do
       r.key = keyOf(r)
-      if not tried[r.key] and (not sweep or (r.n ~= "" and not seen[rowKey(r)])) then row = r; break end
+      if not tried[r.key] and (not sweep or sweepPick(r)) then row = r; break end
     end
     if not row and sweep then break end
     if not row then
@@ -2133,9 +2250,16 @@ local function exportList(app, R)
                     ff = ctx0.ff, dy = ctx0.dy,
                     list = { saved = R.saved, alias = R.alias, thisRun = thisRun, lastKey = lastKey,
                              firstRow = not anyOpened, gap = gap,
-                             atOpenPos = lastPos ~= nil and posOf(row.key) == lastPos } }
+                             atOpenPos = lastPos ~= nil and posOf(row.key) == lastPos,
+                             retryMisopen = misopened[row.key] } }
       local okc, r1, r2 = pcall(exportRow, app, ctx, win, row, prevHeader)
       if not okc then
+        if type(r1) == "table" and (r1.abort or r1.blocked) and sweep then
+          -- 20 件済んだ後の見直しの途中: 中断にも失敗にもせず、見直しだけやめる
+          note(ctx, "一覧", "20 件済んだ後の見直しを止めた（" .. tostring(r1.abort or r1.blocked) .. "）")
+          n = n - 1
+          break
+        end
         if type(r1) == "table" and r1.abort then
           R.stopped = r1.abort .. "（一覧の " .. idx .. " 番目で中断）"
           R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace,
@@ -2148,6 +2272,12 @@ local function exportList(app, R)
           r1, r2 = nil, { stage = "内部エラー", msg = tidy(r1) }
         end
       end
+      -- 押した行と違うトークが開いた（読んでから押すまでに新着で一覧がずれた）: その行はまだ
+      -- 開いていないので済んだことにしない（ずれた先で開く。同じ行で2回目は諦める）
+      if ctx.list.wrongRow and not misopened[row.key] then
+        misopened[row.key] = true; tried[row.key] = nil
+        note(ctx, "一覧", "押した行と保存名が合わない（別のトークが開いた）。この行は後で開き直す")
+      end
       if ctx.saveKey then lastKey = ctx.saveKey; anyOpened = true
       elseif ctx.headerN and ctx.headerN ~= prevHeader then lastKey = nil end   -- 別のトーク（飛ばした等）が開いている
       prevHeader = ctx.headerN or prevHeader
@@ -2156,8 +2286,10 @@ local function exportList(app, R)
       if not isSkip then skipsInRow = 0 end
       if r1 == "dup-run" then
         n = n - 1                                   -- 並び替わって同じトークをまた開いた: 数えない
+        if ctx.list.rowSame then retract(row, ctx, "この実行で保存済み") end
       elseif r1 == "dup" then
         R.okN = R.okN + 1
+        if ctx.list.rowSame then retract(row, ctx, "今日もう保存済み") end
         -- 並び替わって同じトークをまた開いたら "dup-run" にして数えない（実機 10/26 21:22:
         -- 保存済みのトークを2回数え、下の2件まで届かなかった）
         if ctx.saveKey then thisRun[ctx.saveKey] = true end
@@ -2166,11 +2298,15 @@ local function exportList(app, R)
       elseif r1 then
         R.okN = R.okN + 1
         R.saved[ctx.saveKey] = true; thisRun[ctx.saveKey] = true
+        if sweep then R.sweepN = (R.sweepN or 0) + 1 end
+        if ctx.list.rowSame then retract(row, ctx, "保存した") end
         log("OK  一覧の " .. idx .. " 番目 → " .. shown)
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
                                       note = "→ " .. maskedSave(r1:match("[^/]+$") or r1) }
-        R.list[#R.list + 1] = { n = idx, name = r1:match("[^/]+$") or r1, how = "保存した" }
+        R.list[#R.list + 1] = { n = idx, name = r1:match("[^/]+$") or r1, how = sweep and "保存した（20 件の後で新着で上へ来た）" or "保存した" }
       elseif isSkip and ctx.headerN and skipped[ctx.headerN] then
+        local hk, rk = rowKey({ n = ctx.headerN, text = "" }), rowKey(row)
+        if row.n ~= "" and (hk == rk or hk:find(rk, 1, true) or rk:find(hk, 1, true)) then retract(row, ctx, "「トークを保存」が無い") end
         -- さっき飛ばしたトーク（新着で並び替わってまた開いた）: 飛ばした数にも names.txt にも
         -- もう一度は書かない
         if r2.imgPath then os.remove(r2.imgPath) end
@@ -2182,6 +2318,10 @@ local function exportList(app, R)
         -- 数えない。毎日のことなので撮影画像は最初の2件だけ残す。続けて SKIP_MAX 件あれば
         -- 「トークを保存」の読み方が変わったのかもしれないので、止めて失敗に書く
         if ctx.headerN then skipped[ctx.headerN] = true end
+        local hk, rk = rowKey({ n = ctx.headerN or "", text = "" }), rowKey(row)
+        if row.n ~= "" and ctx.headerN and (hk == rk or hk:find(rk, 1, true) or rk:find(hk, 1, true)) then
+          retract(row, ctx, "「トークを保存」が無い")
+        end
         R.skipN = R.skipN + 1; skipsInRow = skipsInRow + 1
         if r2.imgPath and R.skipN > 2 then os.remove(r2.imgPath) end
         R.results[#R.results + 1] = { name = ctx.name, ok = true, trace = ctx.trace,
@@ -2193,32 +2333,65 @@ local function exportList(app, R)
             nil, r2.img and ("最初の画像: " .. r2.img) or nil)
           break
         end
+      elseif row.n ~= "" and failed[rowKey(row)] then
+        -- さっき失敗した行（並び替わってまた開いた）がまた失敗: 失敗にも 20 件にも2回は数えない
+        n = n - 1
+        log("NG  一覧の " .. idx .. " 番目（" .. shown .. "）  さっきと同じ行がまた失敗（数えない）")
+        R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace, e = r2,
+                                      note = "（さっき失敗した行。数えない）" }
       else
         R.ngN = R.ngN + 1
         log("NG  一覧の " .. idx .. " 番目（" .. shown .. "）  " .. describe(r2, true))
         R.ngLines[#R.ngLines + 1] = ctx.name .. ": " .. describe(r2)
         R.results[#R.results + 1] = { name = ctx.name, ok = false, trace = ctx.trace, e = r2 }
         R.list[#R.list + 1] = { n = idx, name = ctx.saveName or row.text, how = "失敗: " .. describe(r2) }
+        -- 名前が画面に1回だけの行だけ覚える（同じに読める別のトークの失敗をまとめない）
+        local same = 0
+        for _, b in ipairs(before) do if rowKey(b) == rowKey(row) then same = same + 1 end end
+        if row.n ~= "" and same == 1 then failed[rowKey(row)] = { list = R.list[#R.list], ng = R.ngLines[#R.ngLines] } end
         -- 保存名まで見て失敗したトークは、並び替わってまた開いても 20 件に2回数えない（「開か
         -- ない」の失敗の保存名は前のトークのもので、押した行のトークではないので除く）
         if ctx.saveKey and r2 and r2.stage ~= "トーク確認" then thisRun[ctx.saveKey] = true end
       end
-      if n >= LIST_TOP and (sweep or not sc.moved) then break end   -- 20 件済んだ: 一覧を読み直さない
+      if n >= LIST_TOP and not sweep and not sc.moved then break end   -- 20 件済んだ: 一覧を読み直さない
+      if sweep then sweepN = sweepN + 1; if sweepN >= 5 then break end end
       local after20 = n >= LIST_TOP                 -- 20 件済んで、これから見直し（読めなくても失敗にしない）
       wait(0.5)
       rows = read()                                 -- 開いた後の一覧（新着で並び替わることがある）
       if not rows or #rows == 0 then wait(1); rows = read() end
       if rows and #rows > 0 then
-        local k, stale, dOpen = follow(before, rows, row, ctx)
-        lastPos = not stale and (posOf(row.key) + (dOpen or k or 0)) or nil
-        if (k and sc.offset > 0) or after20 then
-          if after20 then
+        local f = follow(before, rows, row, ctx)
+        if ctx.list.wrongRow then lastPos = posOf(row.key)   -- 押した所に来ていた別のトークが開いている
+        elseif f.openPos then lastPos = f.openPos   -- 開いたトークの今の位置が分かった
+        elseif f.left or f.stale or f.unknown then lastPos = nil
+        else lastPos = posOf(row.key) + (f.dOpen or 0) end
+        if after20 and f.k then sweepUpTo = math.max(sweepUpTo or 0, f.upTo) end   -- 20 件目で来た新着も見直しで開く
+        if (f.k and sc.offset > 0) or after20 then
+          if after20 and not sweep then
             sweep = true
             note(ctx, "一覧", "20 件済んだ。下へ送っている間に新着で上へ来たトークが無いか、一番上を見る")
           end
-          sc.top(); sc.offset = 0
-          rows = read()
-          if not rows or #rows == 0 then wait(1); rows = read() end
+          if after20 then
+            -- 20 件済んだ後の見直しは、人が触った・前面が変わった時も中断・失敗にしない
+            local okTop, errTop = pcall(function()
+              sc.top(); sc.offset = 0
+              rows = read()
+              if not rows or #rows == 0 then wait(1); rows = read() end
+            end)
+            if not okTop then
+              note(ctx, "一覧", "20 件済んだ後の見直しを止めた（" .. tostring(type(errTop) == "table" and (errTop.abort or errTop.blocked) or tidy(errTop)) .. "）")
+              rows = nil
+            end
+          else
+            sc.top(); sc.offset = 0
+            rows = read()
+            if not rows or #rows == 0 then wait(1); rows = read() end
+          end
+          if f.left and rows then                     -- 開いたトークは一番上の方の、この実行で見なかった字の行
+            for _, r in ipairs(rows) do
+              if not seen[rowKey(r)] then lastPos = posOf(keyOf(r)); break end
+            end
+          end
         end
       end
       if not rows or #rows == 0 then
@@ -2865,8 +3038,10 @@ local function runExport(auto)
     res = { day = DONE.day, version = VERSION, ng = ngN, ok = DONE.ok }
   end
   writeResult(res)
-  writeHeartbeat(okN, ngN, ngLines, (stopped and ("中断: " .. stopped))
-    or ((R.skipN or 0) > 0 and ("「トークを保存」が無いトークを " .. R.skipN .. " 件飛ばした")) or nil)
+  local notes = {}
+  if (R.skipN or 0) > 0 then notes[#notes + 1] = "「トークを保存」が無いトークを " .. R.skipN .. " 件飛ばした" end
+  if (R.sweepN or 0) > 0 then notes[#notes + 1] = "20 件の後で新着で上へ来たトークを " .. R.sweepN .. " 件保存した" end
+  writeHeartbeat(okN, ngN, ngLines, (stopped and ("中断: " .. stopped)) or (#notes > 0 and table.concat(notes, "。")) or nil)
   writeReport((auto and "自動実行" or "手動実行") .. (stopped and "・中断" or ""), results)
 
   local pushed = runSync()
