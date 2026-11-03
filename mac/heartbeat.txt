@@ -1,7 +1,5 @@
-last_run: 2026-10-31 00:42:57
+last_run: 2026-11-03 22:39:29
 version: v4.1-826e0986
 ok: 0
-ng: 1
-failures:
-  - 一覧: [窓] LINE の窓が開かない・前面に来ない（検索欄のある窓が無い）
-debug: Dropbox の Backups/line-dump-debug（撮影画像と診断。非公開）
+ng: 0
+note: 見送り中: 使用中（無操作 0 秒。180 秒で始める）
