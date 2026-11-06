@@ -1,26 +1,7 @@
-last_run: 2026-11-06 09:04:06
+last_run: 2026-11-07 00:36:45
 version: v4.1-826e0986
 ok: 0
-ng: 20
+ng: 1
 failures:
-  - 一覧の1番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-085845_一覧の1番目_クリック.jpg）
-  - 一覧の2番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-085859_一覧の2番目_クリック.jpg）
-  - 一覧の3番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-085913_一覧の3番目_クリック.jpg）
-  - 一覧の4番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-085926_一覧の4番目_クリック.jpg）
-  - 一覧の5番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-085940_一覧の5番目_クリック.jpg）
-  - 一覧の6番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-085954_一覧の6番目_クリック.jpg）
-  - 一覧の7番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090009_一覧の7番目_クリック.jpg）
-  - 一覧の8番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090024_一覧の8番目_クリック.jpg）
-  - 一覧の9番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090038_一覧の9番目_クリック.jpg）
-  - 一覧の10番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090052_一覧の10番目_クリック.jpg）
-  - 一覧の11番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090105_一覧の11番目_クリック.jpg）
-  - 一覧の12番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090119_一覧の12番目_クリック.jpg）
-  - 一覧の15番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090203_一覧の15番目_クリック.jpg）
-  - 一覧の16番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090217_一覧の16番目_クリック.jpg）
-  - 一覧の17番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090231_一覧の17番目_クリック.jpg）
-  - 一覧の18番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090245_一覧の18番目_クリック.jpg）
-  - 一覧の19番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090259_一覧の19番目_クリック.jpg）
-  - 一覧の20番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090323_一覧の20番目_クリック.jpg）
-  - 一覧の21番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090337_一覧の21番目_クリック.jpg）
-  - 一覧の22番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261106-090401_一覧の22番目_クリック.jpg）
+  - 一覧: [窓] LINE の窓が開かない・前面に来ない（検索欄のある窓が無い）
 debug: Dropbox の Backups/line-dump-debug（撮影画像と診断。非公開）
