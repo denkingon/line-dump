@@ -1,15 +1,5 @@
-last_run: 2026-11-15 00:39:52
+last_run: 2026-11-15 00:57:14
 version: v4.1-826e0986
-ok: 6
-ng: 8
-note: 中断: 人の操作を検知（一覧の 15 番目で中断）
-failures:
-  - 一覧の7番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003804_一覧の7番目_クリック.jpg）
-  - 一覧の8番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003818_一覧の8番目_クリック.jpg）
-  - 一覧の9番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003832_一覧の9番目_クリック.jpg）
-  - 一覧の10番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003846_一覧の10番目_クリック.jpg）
-  - 一覧の11番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003900_一覧の11番目_クリック.jpg）
-  - 一覧の12番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003914_一覧の12番目_クリック.jpg）
-  - 一覧の13番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003930_一覧の13番目_クリック.jpg）
-  - 一覧の14番目: [クリック] 押す所に LINE 以外の物が重なっている（通知センター）（画像: Dropbox の Backups/line-dump-debug/20261115-003945_一覧の14番目_クリック.jpg）
-debug: Dropbox の Backups/line-dump-debug（撮影画像と診断。非公開）
+ok: 25
+ng: 0
+note: 20 件の後で新着で上へ来たトークを 4 件保存した
